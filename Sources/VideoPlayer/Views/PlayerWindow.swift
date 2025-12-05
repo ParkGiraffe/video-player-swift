@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import AVFoundation
+import Combine
 
 struct PlayerWindow: View {
     @EnvironmentObject var appState: AppState
@@ -12,6 +13,7 @@ struct PlayerWindow: View {
     @State private var showControls = true
     @State private var hideControlsTask: Task<Void, Never>?
     @State private var isHovering = false
+    @State private var videoEndedCancellable: AnyCancellable?
     
     var body: some View {
         ZStack {
@@ -31,6 +33,7 @@ struct PlayerWindow: View {
                 .frame(width: 0, height: 0)
                 .onAppear {
                     loadVideo()
+                    setupVideoEndedObserver()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         NSApp.activate(ignoringOtherApps: true)
                     }
@@ -38,6 +41,7 @@ struct PlayerWindow: View {
                 .onDisappear {
                     savePosition()
                     playerService.stop()
+                    videoEndedCancellable?.cancel()
                 }
             
             // 전체 화면 탭 영역 (컨트롤 제외)
@@ -114,6 +118,37 @@ struct PlayerWindow: View {
         if let pos = position, pos > 1 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 playerService.seek(to: pos)
+            }
+        }
+    }
+    
+    private func setupVideoEndedObserver() {
+        videoEndedCancellable = playerService.videoEndedSubject
+            .receive(on: DispatchQueue.main)
+            .sink { [self] in
+                handleVideoEnded()
+            }
+    }
+    
+    private func handleVideoEnded() {
+        // 자동 재생이 활성화된 경우에만 다음 영상 재생
+        guard appState.autoPlayNextEnabled else { return }
+        
+        // 셔플 모드인 경우 랜덤 재생
+        if appState.shuffleEnabled {
+            savePosition()
+            appState.playRandomVideo()
+            if let nextVideo = appState.currentPlayingVideo {
+                loadVideoFor(nextVideo)
+            }
+        } else {
+            // 다음 영상이 있는 경우에만 재생
+            if appState.currentVideoIndex < appState.videos.count - 1 {
+                savePosition()
+                appState.playNextVideo()
+                if let nextVideo = appState.currentPlayingVideo {
+                    loadVideoFor(nextVideo)
+                }
             }
         }
     }
@@ -198,7 +233,11 @@ struct PlayerWindow: View {
     }
     
     private func playNext() {
-        if appState.currentVideoIndex < appState.videos.count - 1 {
+        let canPlay = appState.shuffleEnabled 
+            ? appState.videos.count > 1 
+            : appState.currentVideoIndex < appState.videos.count - 1
+        
+        if canPlay {
             savePosition()
             appState.playNextVideo()
             if let nextVideo = appState.currentPlayingVideo {
@@ -208,7 +247,11 @@ struct PlayerWindow: View {
     }
     
     private func playPrevious() {
-        if appState.currentVideoIndex > 0 {
+        let canPlay = appState.shuffleEnabled 
+            ? appState.canPlayPreviousInShuffle 
+            : appState.currentVideoIndex > 0
+        
+        if canPlay {
             savePosition()
             appState.playPreviousVideo()
             if let prevVideo = appState.currentPlayingVideo {
@@ -285,6 +328,23 @@ struct PlayerControlsOverlay: View {
     @State private var showSpeedMenu = false
     @State private var showSettingsMenu = false
     
+    // 셔플 모드에서는 히스토리 기반으로, 일반 모드에서는 인덱스 기반으로 판단
+    private var canPlayPrevious: Bool {
+        if appState.shuffleEnabled {
+            return appState.canPlayPreviousInShuffle
+        } else {
+            return appState.currentVideoIndex > 0
+        }
+    }
+    
+    private var canPlayNext: Bool {
+        if appState.shuffleEnabled {
+            return appState.videos.count > 1  // 셔플 모드에서는 영상이 2개 이상이면 항상 가능
+        } else {
+            return appState.currentVideoIndex < appState.videos.count - 1
+        }
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             // Top bar
@@ -359,7 +419,7 @@ struct PlayerControlsOverlay: View {
                     HStack(spacing: 16) {
                         // Previous
                         Button {
-                            if appState.currentVideoIndex > 0 {
+                            if canPlayPrevious {
                                 appState.playPreviousVideo()
                                 if let video = appState.currentPlayingVideo {
                                     playerService.loadFile(video.path)
@@ -370,8 +430,8 @@ struct PlayerControlsOverlay: View {
                                 .font(.system(size: 22))
                         }
                         .buttonStyle(.plain)
-                        .foregroundColor(appState.currentVideoIndex > 0 ? .white : .white.opacity(0.3))
-                        .disabled(appState.currentVideoIndex <= 0)
+                        .foregroundColor(canPlayPrevious ? .white : .white.opacity(0.3))
+                        .disabled(!canPlayPrevious)
                         
                         // -10s
                         Button {
@@ -405,7 +465,7 @@ struct PlayerControlsOverlay: View {
                         
                         // Next
                         Button {
-                            if appState.currentVideoIndex < appState.videos.count - 1 {
+                            if canPlayNext {
                                 appState.playNextVideo()
                                 if let video = appState.currentPlayingVideo {
                                     playerService.loadFile(video.path)
@@ -416,8 +476,8 @@ struct PlayerControlsOverlay: View {
                                 .font(.system(size: 22))
                         }
                         .buttonStyle(.plain)
-                        .foregroundColor(appState.currentVideoIndex < appState.videos.count - 1 ? .white : .white.opacity(0.3))
-                        .disabled(appState.currentVideoIndex >= appState.videos.count - 1)
+                        .foregroundColor(canPlayNext ? .white : .white.opacity(0.3))
+                        .disabled(!canPlayNext)
                     }
                     
                     // Time display
@@ -509,6 +569,15 @@ struct PlayerControlsOverlay: View {
                                 Text("재생 설정")
                                     .font(.headline)
                                     .padding(.bottom, 4)
+                                
+                                Toggle(isOn: $appState.autoPlayNextEnabled) {
+                                    HStack {
+                                        Image(systemName: "play.circle")
+                                            .foregroundColor(appState.autoPlayNextEnabled ? .accentColor : .secondary)
+                                        Text("다음 영상 자동 재생")
+                                    }
+                                }
+                                .toggleStyle(.switch)
                                 
                                 Toggle(isOn: $appState.shuffleEnabled) {
                                     HStack {

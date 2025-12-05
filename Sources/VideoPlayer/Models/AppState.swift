@@ -33,7 +33,11 @@ class AppState: ObservableObject {
     @Published var currentPlayingVideo: Video?
     @Published var currentVideoIndex: Int = 0
     @Published var shuffleEnabled: Bool = false
-    private var playedVideoIds: Set<String> = []  // 랜덤 재생 시 이미 재생한 비디오 추적
+    @Published var autoPlayNextEnabled: Bool = false  // 영상 종료 시 다음 영상 자동 재생
+    
+    // 셔플 재생 히스토리 (순서 보존)
+    private var playbackHistory: [String] = []  // 비디오 ID 배열 (재생 순서대로)
+    private var historyIndex: Int = -1  // 현재 히스토리에서의 위치
     
     // Services
     private let database = DatabaseService.shared
@@ -240,6 +244,12 @@ class AppState: ObservableObject {
         currentPlayingVideo = video
         currentVideoIndex = videos.firstIndex(where: { $0.id == video.id }) ?? 0
         isPlayerOpen = true
+        
+        // 셔플 모드일 때 히스토리 초기화 및 현재 영상 추가
+        if shuffleEnabled {
+            playbackHistory = [video.id]
+            historyIndex = 0
+        }
     }
     
     func openPlayer(video: Video) {
@@ -253,7 +263,18 @@ class AppState: ObservableObject {
     
     func playNextVideo() {
         if shuffleEnabled {
-            playRandomVideo()
+            // 히스토리에서 앞으로 갈 수 있으면 (이전에 "이전"으로 돌아간 경우)
+            if historyIndex < playbackHistory.count - 1 {
+                historyIndex += 1
+                let videoId = playbackHistory[historyIndex]
+                if let video = videos.first(where: { $0.id == videoId }) {
+                    currentVideoIndex = videos.firstIndex(where: { $0.id == video.id }) ?? 0
+                    currentPlayingVideo = video
+                }
+            } else {
+                // 새로운 랜덤 영상 선택
+                playRandomVideo()
+            }
         } else {
             guard currentVideoIndex < videos.count - 1 else { return }
             currentVideoIndex += 1
@@ -262,39 +283,58 @@ class AppState: ObservableObject {
     }
     
     func playPreviousVideo() {
-        guard currentVideoIndex > 0 else { return }
-        currentVideoIndex -= 1
-        currentPlayingVideo = videos[currentVideoIndex]
+        if shuffleEnabled {
+            // 셔플 모드에서는 히스토리를 따라 이전 영상으로 이동
+            guard historyIndex > 0 else { return }
+            historyIndex -= 1
+            let videoId = playbackHistory[historyIndex]
+            if let video = videos.first(where: { $0.id == videoId }) {
+                currentVideoIndex = videos.firstIndex(where: { $0.id == video.id }) ?? 0
+                currentPlayingVideo = video
+            }
+        } else {
+            guard currentVideoIndex > 0 else { return }
+            currentVideoIndex -= 1
+            currentPlayingVideo = videos[currentVideoIndex]
+        }
+    }
+    
+    /// 셔플 모드에서 이전 영상으로 갈 수 있는지 확인
+    var canPlayPreviousInShuffle: Bool {
+        return historyIndex > 0
     }
     
     func playRandomVideo() {
         guard videos.count > 1 else { return }
         
-        // 현재 비디오를 재생 기록에 추가
-        if let currentId = currentPlayingVideo?.id {
-            playedVideoIds.insert(currentId)
-        }
+        // 이미 재생한 비디오 ID들 (히스토리에서 추출)
+        let playedIds = Set(playbackHistory)
         
         // 아직 재생하지 않은 비디오 필터링
-        let unplayedVideos = videos.filter { !playedVideoIds.contains($0.id) }
+        let unplayedVideos = videos.filter { !playedIds.contains($0.id) }
         
-        // 모든 비디오를 재생했으면 기록 초기화
-        let availableVideos = unplayedVideos.isEmpty ? videos : unplayedVideos
-        if unplayedVideos.isEmpty {
-            playedVideoIds.removeAll()
-        }
+        // 모든 비디오를 재생했으면 현재 비디오만 제외
+        let availableVideos = unplayedVideos.isEmpty 
+            ? videos.filter { $0.id != currentPlayingVideo?.id }
+            : unplayedVideos.filter { $0.id != currentPlayingVideo?.id }
         
-        // 현재 비디오 제외하고 랜덤 선택
-        let candidateVideos = availableVideos.filter { $0.id != currentPlayingVideo?.id }
-        
-        if let randomVideo = candidateVideos.randomElement() {
+        if let randomVideo = availableVideos.randomElement() ?? videos.first(where: { $0.id != currentPlayingVideo?.id }) {
             currentVideoIndex = videos.firstIndex(where: { $0.id == randomVideo.id }) ?? 0
             currentPlayingVideo = randomVideo
+            
+            // 히스토리에 추가
+            // 히스토리 중간에서 새 영상을 선택한 경우, 이후 히스토리 삭제
+            if historyIndex < playbackHistory.count - 1 {
+                playbackHistory = Array(playbackHistory.prefix(historyIndex + 1))
+            }
+            playbackHistory.append(randomVideo.id)
+            historyIndex = playbackHistory.count - 1
         }
     }
     
     func resetShuffleHistory() {
-        playedVideoIds.removeAll()
+        playbackHistory.removeAll()
+        historyIndex = -1
     }
     
     // MARK: - Tags

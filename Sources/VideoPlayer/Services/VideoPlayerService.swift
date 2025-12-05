@@ -31,6 +31,9 @@ class VideoPlayerService: ObservableObject {
     @Published var error: String?
     @Published var currentPlayerType: PlayerType = .avPlayer
     
+    // 영상 종료 이벤트
+    let videoEndedSubject = PassthroughSubject<Void, Never>()
+    
     // MKV 등 AVPlayer에서 지원하지 않는 포맷
     private let mpvOnlyFormats = ["mkv", "avi", "wmv", "flv", "webm"]
     
@@ -83,6 +86,7 @@ class VideoPlayerService: ObservableObject {
             .sink { [weak self] _ in
                 guard self?.currentPlayerType == .avPlayer else { return }
                 self?.isPlaying = false
+                self?.videoEndedSubject.send()
             }
             .store(in: &cancellables)
     }
@@ -185,6 +189,13 @@ class VideoPlayerService: ObservableObject {
         mpvView.onError = { [weak self] errorMsg in
             DispatchQueue.main.async {
                 self?.error = errorMsg
+            }
+        }
+        
+        mpvView.onEndOfFile = { [weak self] in
+            DispatchQueue.main.async {
+                self?.isPlaying = false
+                self?.videoEndedSubject.send()
             }
         }
         
