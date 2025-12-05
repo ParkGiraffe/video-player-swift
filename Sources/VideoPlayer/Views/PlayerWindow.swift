@@ -327,6 +327,7 @@ struct PlayerControlsOverlay: View {
     
     @State private var showSpeedMenu = false
     @State private var showSettingsMenu = false
+    @State private var showDeleteConfirmation = false
     
     // 셔플 모드에서는 히스토리 기반으로, 일반 모드에서는 인덱스 기반으로 판단
     private var canPlayPrevious: Bool {
@@ -592,9 +593,37 @@ struct PlayerControlsOverlay: View {
                                         appState.resetShuffleHistory()
                                     }
                                 }
+                                
+                                Divider()
+                                    .padding(.vertical, 4)
+                                
+                                // 영상 삭제 버튼
+                                Button(role: .destructive) {
+                                    showSettingsMenu = false
+                                    // 약간의 딜레이 후 삭제 확인 모달 표시
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                        showDeleteConfirmation = true
+                                    }
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "trash")
+                                            .foregroundColor(.red)
+                                        Text("영상 삭제")
+                                            .foregroundColor(.red)
+                                    }
+                                }
+                                .buttonStyle(.plain)
                             }
                             .padding()
                             .frame(width: 220)
+                        }
+                        .alert("영상 삭제", isPresented: $showDeleteConfirmation) {
+                            Button("취소", role: .cancel) { }
+                            Button("삭제", role: .destructive) {
+                                deleteCurrentVideo()
+                            }
+                        } message: {
+                            Text("'\(appState.currentPlayingVideo?.filename ?? video.filename)' 파일을 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.")
                         }
                     }
                 }
@@ -634,6 +663,60 @@ struct PlayerControlsOverlay: View {
             return String(format: "%d:%02d:%02d", hours, minutes, secs)
         }
         return String(format: "%d:%02d", minutes, secs)
+    }
+    
+    private func deleteCurrentVideo() {
+        guard let currentVideo = appState.currentPlayingVideo else { return }
+        
+        let fileManager = FileManager.default
+        let videoURL = URL(fileURLWithPath: currentVideo.path)
+        let videoName = videoURL.deletingPathExtension().lastPathComponent
+        let videoFolder = videoURL.deletingLastPathComponent()
+        
+        // 1. 커스텀 썸네일 삭제 (영상과 같은 폴더에 같은 이름의 이미지 파일)
+        let thumbnailExtensions = ["jpg", "jpeg", "png", "webp"]
+        for ext in thumbnailExtensions {
+            let thumbnailPath = videoFolder.appendingPathComponent("\(videoName).\(ext)")
+            if fileManager.fileExists(atPath: thumbnailPath.path) {
+                do {
+                    try fileManager.removeItem(at: thumbnailPath)
+                    print("✅ 커스텀 썸네일 삭제 완료: \(thumbnailPath.lastPathComponent)")
+                } catch {
+                    print("⚠️ 커스텀 썸네일 삭제 실패: \(error.localizedDescription)")
+                }
+            }
+        }
+        
+        // 2. 앱에서 생성한 썸네일 삭제 (Application Support 폴더)
+        Task {
+            await ThumbnailService.shared.deleteThumbnail(videoId: currentVideo.id)
+        }
+        
+        // 3. 영상 파일 삭제
+        do {
+            try fileManager.removeItem(atPath: currentVideo.path)
+            print("✅ 영상 파일 삭제 완료: \(currentVideo.path)")
+        } catch {
+            print("❌ 영상 파일 삭제 실패: \(error.localizedDescription)")
+            // 파일 삭제 실패해도 DB에서는 삭제 진행
+        }
+        
+        // 다음 영상 재생을 위해 미리 확인
+        let hasNextVideo = canPlayNext || (appState.shuffleEnabled && appState.videos.count > 1)
+        
+        // 앱 상태에서 삭제 (히스토리 처리 포함)
+        appState.deleteVideoAndUpdateHistory(currentVideo)
+        
+        // 다음 영상 재생 또는 플레이어 닫기
+        if hasNextVideo && appState.videos.count > 0 {
+            appState.playNextVideo()
+            if let nextVideo = appState.currentPlayingVideo {
+                playerService.loadFile(nextVideo.path)
+            }
+        } else {
+            // 재생할 영상이 없으면 플레이어 닫기
+            onClose()
+        }
     }
 }
 

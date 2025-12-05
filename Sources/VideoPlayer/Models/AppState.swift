@@ -337,6 +337,55 @@ class AppState: ObservableObject {
         historyIndex = -1
     }
     
+    /// 비디오 삭제 및 히스토리 업데이트
+    func deleteVideoAndUpdateHistory(_ video: Video) {
+        let videoId = video.id
+        
+        // 데이터베이스에서 삭제
+        database.deleteVideo(videoId)
+        
+        // 현재 목록에서 제거
+        videos.removeAll { $0.id == videoId }
+        
+        // 히스토리에서 해당 비디오 제거 및 인덱스 조정
+        if shuffleEnabled {
+            // 히스토리에서 현재 위치 이전에 있는 삭제된 영상 수 계산
+            var removedBeforeCurrent = 0
+            for i in 0..<playbackHistory.count {
+                if playbackHistory[i] == videoId && i < historyIndex {
+                    removedBeforeCurrent += 1
+                }
+            }
+            
+            // 히스토리에서 삭제된 비디오 제거
+            playbackHistory.removeAll { $0 == videoId }
+            
+            // 인덱스 조정
+            historyIndex -= removedBeforeCurrent
+            
+            // 인덱스가 범위를 벗어나면 조정
+            if historyIndex >= playbackHistory.count {
+                historyIndex = playbackHistory.count - 1
+            }
+            if historyIndex < 0 && !playbackHistory.isEmpty {
+                historyIndex = 0
+            }
+        }
+        
+        // currentVideoIndex 조정
+        if currentVideoIndex >= videos.count {
+            currentVideoIndex = max(0, videos.count - 1)
+        }
+        
+        // 선택 해제
+        if selectedVideo?.id == videoId {
+            selectedVideo = nil
+        }
+        
+        // currentPlayingVideo는 호출하는 측에서 다음 영상으로 설정할 것임
+        currentPlayingVideo = nil
+    }
+    
     // MARK: - Tags
     
     func loadTags() async {
