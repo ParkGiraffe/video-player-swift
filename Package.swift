@@ -14,19 +14,30 @@ let package = Package(
         .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.14.1"),
     ],
     targets: [
+        // System library for libmpv
+        .systemLibrary(
+            name: "Clibmpv",
+            path: "Sources/Clibmpv",
+            pkgConfig: "mpv",
+            providers: [
+                .brew(["mpv"])
+            ]
+        ),
         .executableTarget(
             name: "VideoPlayer",
             dependencies: [
                 .product(name: "SQLite", package: "SQLite.swift"),
+                "Clibmpv"
             ],
             path: "Sources/VideoPlayer",
             resources: [
                 .process("Resources")
             ],
+            swiftSettings: [
+                .unsafeFlags(["-I/opt/homebrew/include"])
+            ],
             linkerSettings: [
-                // Link mpv library
-                .linkedLibrary("mpv"),
-                .unsafeFlags(["-L/opt/homebrew/lib", "-I/opt/homebrew/include"])
+                .unsafeFlags(["-L/opt/homebrew/lib"])
             ]
         )
     ]

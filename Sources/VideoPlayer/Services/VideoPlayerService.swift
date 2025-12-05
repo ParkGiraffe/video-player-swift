@@ -3,10 +3,21 @@ import AVFoundation
 import AVKit
 import Combine
 
+// 플레이어 타입
+enum PlayerType {
+    case avPlayer
+    case mpv
+}
+
 class VideoPlayerService: ObservableObject {
     static let shared = VideoPlayerService()
     
+    // AVPlayer (mp4, mov 등)
     let player = AVPlayer()
+    
+    // MPV Player View (mkv, avi 등)
+    var mpvPlayerView: MPVPlayerView?
+    
     private var timeObserver: Any?
     private var cancellables = Set<AnyCancellable>()
     
@@ -18,6 +29,10 @@ class VideoPlayerService: ObservableObject {
     @Published var playbackSpeed: Float = 1.0
     @Published var isLoaded: Bool = false
     @Published var error: String?
+    @Published var currentPlayerType: PlayerType = .avPlayer
+    
+    // MKV 등 AVPlayer에서 지원하지 않는 포맷
+    private let mpvOnlyFormats = ["mkv", "avi", "wmv", "flv", "webm"]
     
     private init() {
         setupObservers()
@@ -28,6 +43,7 @@ class VideoPlayerService: ObservableObject {
         player.publisher(for: \.timeControlStatus)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
+                guard self?.currentPlayerType == .avPlayer else { return }
                 self?.isPlaying = status == .playing
             }
             .store(in: &cancellables)
@@ -36,6 +52,7 @@ class VideoPlayerService: ObservableObject {
         player.publisher(for: \.volume)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] vol in
+                guard self?.currentPlayerType == .avPlayer else { return }
                 self?.volume = vol
             }
             .store(in: &cancellables)
@@ -44,6 +61,7 @@ class VideoPlayerService: ObservableObject {
         player.publisher(for: \.isMuted)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] muted in
+                guard self?.currentPlayerType == .avPlayer else { return }
                 self?.isMuted = muted
             }
             .store(in: &cancellables)
@@ -52,6 +70,7 @@ class VideoPlayerService: ObservableObject {
         player.publisher(for: \.rate)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] rate in
+                guard self?.currentPlayerType == .avPlayer else { return }
                 if rate != 0 {
                     self?.playbackSpeed = rate
                 }
@@ -62,28 +81,38 @@ class VideoPlayerService: ObservableObject {
         NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
+                guard self?.currentPlayerType == .avPlayer else { return }
                 self?.isPlaying = false
             }
             .store(in: &cancellables)
+    }
+    
+    // 포맷에 따라 사용할 플레이어 결정
+    func getPlayerType(for path: String) -> PlayerType {
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        return mpvOnlyFormats.contains(ext) ? .mpv : .avPlayer
     }
     
     func loadFile(_ path: String) {
         error = nil
         isLoaded = false
         
+        let playerType = getPlayerType(for: path)
+        currentPlayerType = playerType
+        
+        if playerType == .mpv {
+            loadWithMPV(path)
+        } else {
+            loadWithAVPlayer(path)
+        }
+    }
+    
+    private func loadWithAVPlayer(_ path: String) {
+        // MPV 정리
+        mpvPlayerView?.stop()
+        
         let url = URL(fileURLWithPath: path)
         let asset = AVAsset(url: url)
-        
-        // Check if format is supported
-        let ext = url.pathExtension.lowercased()
-        let unsupportedFormats = ["mkv", "avi", "wmv", "flv"]
-        
-        if unsupportedFormats.contains(ext) {
-            error = "이 포맷(\(ext.uppercased()))은 AVPlayer에서 지원하지 않습니다.\nmpv로 외부 재생합니다."
-            openWithExternalPlayer(path)
-            return
-        }
-        
         let playerItem = AVPlayerItem(asset: asset)
         player.replaceCurrentItem(with: playerItem)
         
@@ -112,84 +141,151 @@ class VideoPlayerService: ObservableObject {
             .store(in: &cancellables)
     }
     
-    private func openWithExternalPlayer(_ path: String) {
-        // mpv로 외부 재생
-        let mpvPaths = [
-            "/opt/homebrew/bin/mpv",
-            "/usr/local/bin/mpv"
-        ]
+    private func loadWithMPV(_ path: String) {
+        // AVPlayer 정리
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        removeTimeObserver()
         
-        var mpvPath: String?
-        for p in mpvPaths {
-            if FileManager.default.fileExists(atPath: p) {
-                mpvPath = p
-                break
+        // MPV 플레이어 뷰가 없으면 생성
+        if mpvPlayerView == nil {
+            mpvPlayerView = MPVPlayerView(frame: NSRect(x: 0, y: 0, width: 800, height: 450), pixelFormat: nil)
+        }
+        
+        guard let mpvView = mpvPlayerView else {
+            error = "MPV 플레이어를 초기화할 수 없습니다."
+            return
+        }
+        
+        // MPV 콜백 설정
+        mpvView.onTimeUpdate = { [weak self] time in
+            DispatchQueue.main.async {
+                self?.currentTime = time
             }
         }
         
-        if let mpvPath = mpvPath {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: mpvPath)
-            process.arguments = [path]
-            
-            do {
-                try process.run()
-            } catch {
-                self.error = "mpv 실행 실패: \(error.localizedDescription)"
+        mpvView.onDurationUpdate = { [weak self] dur in
+            DispatchQueue.main.async {
+                self?.duration = dur
             }
-        } else {
-            self.error = "mpv가 설치되어 있지 않습니다. brew install mpv로 설치하세요."
         }
+        
+        mpvView.onPlaybackStateChange = { [weak self] playing in
+            DispatchQueue.main.async {
+                self?.isPlaying = playing
+            }
+        }
+        
+        mpvView.onLoadStateChange = { [weak self] loaded in
+            DispatchQueue.main.async {
+                self?.isLoaded = loaded
+            }
+        }
+        
+        mpvView.onError = { [weak self] errorMsg in
+            DispatchQueue.main.async {
+                self?.error = errorMsg
+            }
+        }
+        
+        // 파일 로드
+        if !mpvView.initializeMPV() {
+            error = "MPV를 초기화할 수 없습니다. brew install mpv를 실행하세요."
+            return
+        }
+        
+        mpvView.loadFile(path)
+        isLoaded = true
+        isPlaying = true
     }
     
     func play() {
-        player.play()
-        if playbackSpeed != 1.0 {
-            player.rate = playbackSpeed
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.play()
+        } else {
+            player.play()
+            if playbackSpeed != 1.0 {
+                player.rate = playbackSpeed
+            }
         }
     }
     
     func pause() {
-        player.pause()
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.pause()
+        } else {
+            player.pause()
+        }
     }
     
     func togglePause() {
-        if isPlaying {
-            pause()
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.togglePause()
+            isPlaying = !(mpvPlayerView?.isPaused ?? true)
         } else {
-            play()
+            if isPlaying {
+                pause()
+            } else {
+                play()
+            }
         }
     }
     
     func seek(to seconds: Double) {
-        let time = CMTime(seconds: seconds, preferredTimescale: 600)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.seek(to: seconds)
+        } else {
+            let time = CMTime(seconds: seconds, preferredTimescale: 600)
+            player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
     }
     
     func seekRelative(_ seconds: Double) {
-        let newTime = max(0, min(duration, currentTime + seconds))
-        seek(to: newTime)
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.seekRelative(seconds)
+        } else {
+            let newTime = max(0, min(duration, currentTime + seconds))
+            seek(to: newTime)
+        }
     }
     
     func setVolume(_ vol: Float) {
-        player.volume = max(0, min(1, vol))
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.setVolume(Double(vol) * 100)  // mpv uses 0-100
+            volume = vol
+        } else {
+            player.volume = max(0, min(1, vol))
+        }
     }
     
     func toggleMute() {
-        player.isMuted.toggle()
+        if currentPlayerType == .mpv {
+            isMuted.toggle()
+            mpvPlayerView?.setMuted(isMuted)
+        } else {
+            player.isMuted.toggle()
+        }
     }
     
     func setSpeed(_ speed: Float) {
         playbackSpeed = speed
-        if isPlaying {
-            player.rate = speed
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.setSpeed(Double(speed))
+        } else {
+            if isPlaying {
+                player.rate = speed
+            }
         }
     }
     
     func stop() {
-        player.pause()
-        player.replaceCurrentItem(with: nil)
-        removeTimeObserver()
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.stop()
+        } else {
+            player.pause()
+            player.replaceCurrentItem(with: nil)
+            removeTimeObserver()
+        }
         isLoaded = false
         currentTime = 0
         duration = 0
@@ -204,6 +300,7 @@ class VideoPlayerService: ObservableObject {
     
     deinit {
         removeTimeObserver()
+        mpvPlayerView?.shutdown()
     }
 }
 

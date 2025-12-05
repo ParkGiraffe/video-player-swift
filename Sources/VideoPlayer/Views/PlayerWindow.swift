@@ -15,12 +15,22 @@ struct PlayerWindow: View {
     
     var body: some View {
         ZStack {
-            // Video Player View - AVPlayer embedded
-            VideoPlayerView(player: playerService.player)
-                .background(Color.black)
+            // 플레이어 타입에 따라 다른 뷰 사용
+            if playerService.currentPlayerType == .mpv {
+                // MPV Player View (MKV, AVI 등)
+                MPVPlayerViewWrapper()
+                    .background(Color.black)
+            } else {
+                // AVPlayer View (MP4, MOV 등)
+                VideoPlayerView(player: playerService.player)
+                    .background(Color.black)
+            }
+            
+            // onAppear/onDisappear는 ZStack 레벨에서 처리
+            Color.clear
+                .frame(width: 0, height: 0)
                 .onAppear {
                     loadVideo()
-                    // 창을 최전면으로
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         NSApp.activate(ignoringOtherApps: true)
                     }
@@ -240,6 +250,28 @@ struct VideoPlayerView: NSViewRepresentable {
     
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
         nsView.player = player
+    }
+}
+
+// MPV Player를 SwiftUI에 임베딩하는 NSViewRepresentable
+struct MPVPlayerViewWrapper: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        // VideoPlayerService에서 MPV 뷰를 가져오거나 생성
+        let playerService = VideoPlayerService.shared
+        
+        if let mpvView = playerService.mpvPlayerView {
+            return mpvView
+        } else {
+            // 폴백: 빈 뷰 반환
+            let view = NSView()
+            view.wantsLayer = true
+            view.layer?.backgroundColor = NSColor.black.cgColor
+            return view
+        }
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // MPV 뷰 업데이트
     }
 }
 
