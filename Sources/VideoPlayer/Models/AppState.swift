@@ -18,6 +18,8 @@ class AppState: ObservableObject {
     // UI State
     @Published var selectedVideo: Video?
     @Published var selectedFolder: MountedFolder?
+    @Published var selectedSubfolderPath: String?  // 선택된 하위 폴더 경로
+    @Published var selectedRootOnly: Bool = false  // <Root> 선택 시 true - 해당 폴더의 직접 영상만 표시
     @Published var selectedTag: Tag?
     @Published var selectedParticipant: Participant?
     @Published var selectedLanguage: Language?
@@ -30,6 +32,8 @@ class AppState: ObservableObject {
     @Published var isPlayerOpen: Bool = false
     @Published var currentPlayingVideo: Video?
     @Published var currentVideoIndex: Int = 0
+    @Published var shuffleEnabled: Bool = false
+    private var playedVideoIds: Set<String> = []  // 랜덤 재생 시 이미 재생한 비디오 추적
     
     // Services
     private let database = DatabaseService.shared
@@ -52,6 +56,11 @@ class AppState: ObservableObject {
             await loadParticipants()
             await loadLanguages()
             await loadVideoMappings()
+            
+            // 백그라운드에서 누락된 썸네일 생성
+            Task.detached(priority: .background) {
+                await self.generateMissingThumbnails()
+            }
         }
     }
     
@@ -109,6 +118,36 @@ class AppState: ObservableObject {
         isScanningFolder = nil
         
         print("📊 Total videos in database after scan: \(videos.count)")
+        
+        // 백그라운드에서 썸네일 생성
+        Task.detached(priority: .background) {
+            await self.generateMissingThumbnails()
+        }
+    }
+    
+    /// 썸네일이 없는 비디오에 대해 썸네일 생성
+    func generateMissingThumbnails() async {
+        let videosWithoutThumbnails = database.getVideosWithoutThumbnails()
+        
+        guard !videosWithoutThumbnails.isEmpty else {
+            print("✅ All videos have thumbnails")
+            return
+        }
+        
+        print("🖼️ Generating thumbnails for \(videosWithoutThumbnails.count) videos...")
+        
+        for video in videosWithoutThumbnails {
+            if let thumbnailPath = await ThumbnailService.shared.generateThumbnail(
+                for: video.path,
+                videoId: video.id
+            ) {
+                database.updateVideoThumbnail(videoId: video.id, thumbnailPath: thumbnailPath)
+            }
+        }
+        
+        // 썸네일 생성 후 비디오 목록 새로고침
+        await loadVideos()
+        print("✅ Thumbnail generation complete")
     }
     
     // MARK: - Videos
@@ -118,16 +157,27 @@ class AppState: ObservableObject {
         
         print("🔍 Loading videos...")
         print("   Filter - Folder: \(selectedFolder?.path ?? "none")")
+        print("   Filter - Subfolder: \(selectedSubfolderPath ?? "none")")
+        print("   Filter - RootOnly: \(selectedRootOnly)")
         print("   Filter - Tag: \(selectedTag?.name ?? "none")")
         print("   Filter - Participant: \(selectedParticipant?.name ?? "none")")
         print("   Filter - Language: \(selectedLanguage?.name ?? "none")")
         print("   Filter - Search: \(searchQuery.isEmpty ? "none" : searchQuery)")
         
+        // 하위 폴더 경로 또는 마운트 폴더 경로로 필터링
+        let filterPath = selectedSubfolderPath ?? selectedFolder?.path
+        
         // 기본적으로 모든 비디오 로드
         var allVideos = database.getVideos(
-            folderPath: selectedFolder?.path,
+            folderPath: filterPath,
             searchQuery: searchQuery.isEmpty ? nil : searchQuery
         )
+        
+        // <Root> 필터: 해당 폴더에 직접 있는 영상만 표시
+        if selectedRootOnly, let path = filterPath {
+            allVideos = allVideos.filter { $0.folderPath == path }
+            print("   📊 After rootOnly filter: \(allVideos.count)")
+        }
         
         print("   📊 Videos from DB: \(allVideos.count)")
         
@@ -162,6 +212,30 @@ class AppState: ObservableObject {
         selectedVideo = video
     }
     
+    func deleteVideo(_ video: Video) {
+        // 데이터베이스에서 삭제
+        database.deleteVideo(video.id)
+        
+        // 현재 목록에서 제거
+        videos.removeAll { $0.id == video.id }
+        
+        // 선택 해제
+        if selectedVideo?.id == video.id {
+            selectedVideo = nil
+        }
+    }
+    
+    func updateVideoThumbnail(videoId: String, thumbnailPath: String) {
+        database.updateVideoThumbnail(videoId: videoId, thumbnailPath: thumbnailPath)
+        
+        // 현재 목록에서 해당 비디오 업데이트
+        if let index = videos.firstIndex(where: { $0.id == videoId }) {
+            var updatedVideo = videos[index]
+            updatedVideo.thumbnailPath = thumbnailPath
+            videos[index] = updatedVideo
+        }
+    }
+    
     func playVideo(_ video: Video) {
         currentPlayingVideo = video
         currentVideoIndex = videos.firstIndex(where: { $0.id == video.id }) ?? 0
@@ -178,15 +252,49 @@ class AppState: ObservableObject {
     }
     
     func playNextVideo() {
-        guard currentVideoIndex < videos.count - 1 else { return }
-        currentVideoIndex += 1
-        currentPlayingVideo = videos[currentVideoIndex]
+        if shuffleEnabled {
+            playRandomVideo()
+        } else {
+            guard currentVideoIndex < videos.count - 1 else { return }
+            currentVideoIndex += 1
+            currentPlayingVideo = videos[currentVideoIndex]
+        }
     }
     
     func playPreviousVideo() {
         guard currentVideoIndex > 0 else { return }
         currentVideoIndex -= 1
         currentPlayingVideo = videos[currentVideoIndex]
+    }
+    
+    func playRandomVideo() {
+        guard videos.count > 1 else { return }
+        
+        // 현재 비디오를 재생 기록에 추가
+        if let currentId = currentPlayingVideo?.id {
+            playedVideoIds.insert(currentId)
+        }
+        
+        // 아직 재생하지 않은 비디오 필터링
+        let unplayedVideos = videos.filter { !playedVideoIds.contains($0.id) }
+        
+        // 모든 비디오를 재생했으면 기록 초기화
+        let availableVideos = unplayedVideos.isEmpty ? videos : unplayedVideos
+        if unplayedVideos.isEmpty {
+            playedVideoIds.removeAll()
+        }
+        
+        // 현재 비디오 제외하고 랜덤 선택
+        let candidateVideos = availableVideos.filter { $0.id != currentPlayingVideo?.id }
+        
+        if let randomVideo = candidateVideos.randomElement() {
+            currentVideoIndex = videos.firstIndex(where: { $0.id == randomVideo.id }) ?? 0
+            currentPlayingVideo = randomVideo
+        }
+    }
+    
+    func resetShuffleHistory() {
+        playedVideoIds.removeAll()
     }
     
     // MARK: - Tags
@@ -352,6 +460,8 @@ class AppState: ObservableObject {
     
     func clearFilters() {
         selectedFolder = nil
+        selectedSubfolderPath = nil
+        selectedRootOnly = false
         selectedTag = nil
         selectedParticipant = nil
         selectedLanguage = nil
@@ -360,15 +470,34 @@ class AppState: ObservableObject {
     
     func filterByFolder(_ folder: MountedFolder?) {
         selectedFolder = folder
+        selectedSubfolderPath = nil
+        selectedRootOnly = false
         selectedTag = nil
         selectedParticipant = nil
         selectedLanguage = nil
         Task { await loadVideos() }
     }
     
+    func filterBySubfolder(_ folder: MountedFolder, subfolderPath: String?, rootOnly: Bool = false) {
+        selectedFolder = folder
+        selectedSubfolderPath = subfolderPath
+        selectedRootOnly = rootOnly
+        selectedTag = nil
+        selectedParticipant = nil
+        selectedLanguage = nil
+        Task { await loadVideos() }
+    }
+    
+    /// 마운트된 폴더 내 모든 비디오 반환 (필터 없이)
+    func allVideosInFolder(_ folder: MountedFolder) -> [Video] {
+        return database.getVideos(folderPath: folder.path, searchQuery: nil)
+    }
+    
     func filterByTag(_ tag: Tag) {
         selectedTag = tag
         selectedFolder = nil
+        selectedSubfolderPath = nil
+        selectedRootOnly = false
         selectedParticipant = nil
         selectedLanguage = nil
         Task { await loadVideos() }
@@ -377,6 +506,8 @@ class AppState: ObservableObject {
     func filterByParticipant(_ participant: Participant) {
         selectedParticipant = participant
         selectedFolder = nil
+        selectedSubfolderPath = nil
+        selectedRootOnly = false
         selectedTag = nil
         selectedLanguage = nil
         Task { await loadVideos() }
@@ -385,6 +516,8 @@ class AppState: ObservableObject {
     func filterByLanguage(_ language: Language) {
         selectedLanguage = language
         selectedFolder = nil
+        selectedSubfolderPath = nil
+        selectedRootOnly = false
         selectedTag = nil
         selectedParticipant = nil
         Task { await loadVideos() }

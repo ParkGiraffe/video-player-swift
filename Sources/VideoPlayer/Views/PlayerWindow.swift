@@ -251,6 +251,7 @@ struct PlayerControlsOverlay: View {
     let onClose: () -> Void
     
     @State private var showSpeedMenu = false
+    @State private var showSettingsMenu = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -262,9 +263,25 @@ struct PlayerControlsOverlay: View {
                         .fontWeight(.semibold)
                         .foregroundColor(.white)
                     
-                    Text("\(appState.currentVideoIndex + 1) / \(appState.videos.count)")
-                        .font(.caption)
-                        .foregroundColor(.white.opacity(0.7))
+                    HStack(spacing: 8) {
+                        Text("\(appState.currentVideoIndex + 1) / \(appState.videos.count)")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                        
+                        if appState.shuffleEnabled {
+                            HStack(spacing: 4) {
+                                Image(systemName: "shuffle")
+                                    .font(.system(size: 10))
+                                Text("셔플")
+                                    .font(.caption2)
+                            }
+                            .foregroundColor(.accentColor)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.2))
+                            .cornerRadius(4)
+                        }
+                    }
                 }
                 
                 Spacer()
@@ -441,6 +458,42 @@ struct PlayerControlsOverlay: View {
                             }
                             .frame(width: 100)
                             .padding(.vertical, 4)
+                        }
+                        
+                        // 설정 버튼
+                        Button {
+                            showSettingsMenu.toggle()
+                        } label: {
+                            Image(systemName: "gearshape.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.white)
+                                .padding(6)
+                                .background(Color.white.opacity(0.2))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: $showSettingsMenu, arrowEdge: .top) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("재생 설정")
+                                    .font(.headline)
+                                    .padding(.bottom, 4)
+                                
+                                Toggle(isOn: $appState.shuffleEnabled) {
+                                    HStack {
+                                        Image(systemName: "shuffle")
+                                            .foregroundColor(appState.shuffleEnabled ? .accentColor : .secondary)
+                                        Text("다음 영상 랜덤 재생")
+                                    }
+                                }
+                                .toggleStyle(.switch)
+                                .onChange(of: appState.shuffleEnabled) { _, newValue in
+                                    if !newValue {
+                                        appState.resetShuffleHistory()
+                                    }
+                                }
+                            }
+                            .padding()
+                            .frame(width: 220)
                         }
                     }
                 }

@@ -623,4 +623,30 @@ class DatabaseService {
         }
         return nil
     }
+    
+    // MARK: - Thumbnail
+    
+    func updateVideoThumbnail(videoId: String, thumbnailPath: String) {
+        guard let db = db else { return }
+        
+        do {
+            try db.run(videos.filter(id == videoId).update(self.thumbnailPath <- thumbnailPath))
+        } catch {
+            print("Failed to update thumbnail path: \(error)")
+        }
+    }
+    
+    func getVideosWithoutThumbnails() -> [(id: String, path: String)] {
+        guard let db = db else { return [] }
+        
+        do {
+            let query = videos.filter(thumbnailPath == nil || thumbnailPath == "")
+            return try db.prepare(query).map { row in
+                (id: row[id], path: row[self.path])
+            }
+        } catch {
+            print("Failed to get videos without thumbnails: \(error)")
+            return []
+        }
+    }
 }

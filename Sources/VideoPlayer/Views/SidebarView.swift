@@ -1,5 +1,24 @@
 import SwiftUI
 
+// 폴더 트리 노드 구조체
+struct FolderNode: Identifiable {
+    let id: String
+    let name: String
+    let path: String
+    let depth: Int
+    var children: [FolderNode]
+    var videoCount: Int
+    
+    init(name: String, path: String, depth: Int = 0, children: [FolderNode] = [], videoCount: Int = 0) {
+        self.id = path
+        self.name = name
+        self.path = path
+        self.depth = depth
+        self.children = children
+        self.videoCount = videoCount
+    }
+}
+
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
     @State private var showFolderPicker = false
@@ -8,6 +27,7 @@ struct SidebarView: View {
     @State private var newTagColor = Color(red: 0.39, green: 0.4, blue: 0.95)
     @State private var newLanguageCode = ""
     @State private var newLanguageName = ""
+    @State private var expandedFolders: Set<String> = []
     
     var body: some View {
         List {
@@ -25,50 +45,25 @@ struct SidebarView: View {
             // Mounted Folders
             Section("마운트된 폴더") {
                 ForEach(appState.mountedFolders) { folder in
-                    HStack {
-                        Button {
-                            appState.filterByFolder(folder)
-                        } label: {
-                            Label(folder.name, systemImage: "folder.fill")
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundColor(appState.selectedFolder?.id == folder.id ? .accentColor : .primary)
-                        
-                        Spacer()
-                        
-                        if appState.isScanningFolder == folder.path {
-                            ProgressView()
-                                .scaleEffect(0.7)
-                        } else {
-                            Menu {
-                                Button {
-                                    showFolderSettings = folder
-                                } label: {
-                                    Label("설정", systemImage: "gearshape")
-                                }
-                                
-                                Button {
-                                    Task {
-                                        await appState.scanFolder(folder)
-                                    }
-                                } label: {
-                                    Label("재스캔", systemImage: "arrow.clockwise")
-                                }
-                                
-                                Divider()
-                                
-                                Button(role: .destructive) {
-                                    appState.removeMountedFolder(folder)
-                                } label: {
-                                    Label("제거", systemImage: "trash")
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis.circle")
-                                    .foregroundColor(.secondary)
+                    FolderTreeView(
+                        folder: folder,
+                        folderTree: buildFolderTree(for: folder),
+                        expandedFolders: $expandedFolders,
+                        selectedSubfolderPath: appState.selectedSubfolderPath,
+                        showFolderSettings: $showFolderSettings,
+                        onSelectFolder: { path, rootOnly in
+                            appState.filterBySubfolder(folder, subfolderPath: path, rootOnly: rootOnly)
+                        },
+                        onRescan: {
+                            Task {
+                                await appState.scanFolder(folder)
                             }
-                            .buttonStyle(.plain)
+                        },
+                        onRemove: {
+                            appState.removeMountedFolder(folder)
                         }
-                    }
+                    )
+                    .environmentObject(appState)
                 }
                 
                 Button {
@@ -303,6 +298,375 @@ struct SidebarView: View {
         
         return String(format: "#%02X%02X%02X", r, g, b)
     }
+    
+    /// 마운트된 폴더의 하위 폴더 트리 구조 생성 (재귀적)
+    private func buildFolderTree(for mountedFolder: MountedFolder) -> FolderNode {
+        // 해당 마운트 폴더에 속한 모든 비디오의 폴더 경로 수집
+        let allVideos = appState.allVideosInFolder(mountedFolder)
+        let folderPaths = Set(allVideos.map { $0.folderPath })
+        
+        // 비디오 개수 계산을 위한 맵
+        var videoCountMap: [String: Int] = [:]
+        for video in allVideos {
+            videoCountMap[video.folderPath, default: 0] += 1
+        }
+        
+        let basePath = mountedFolder.path
+        
+        // 재귀적으로 트리 구축
+        func buildNode(path: String, name: String, depth: Int) -> FolderNode {
+            // 중간 폴더도 포함 (비디오가 없더라도)
+            var allChildFolderNames = Set<String>()
+            for folderPath in folderPaths {
+                guard folderPath.hasPrefix(path + "/") else { continue }
+                let relativePath = String(folderPath.dropFirst(path.count + 1))
+                if let firstComponent = relativePath.split(separator: "/").first {
+                    allChildFolderNames.insert(String(firstComponent))
+                }
+            }
+            
+            // 자식 노드들 생성 (재귀)
+            let children = allChildFolderNames
+                .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+                .map { childName -> FolderNode in
+                    let childPath = path + "/" + childName
+                    return buildNode(path: childPath, name: childName, depth: depth + 1)
+                }
+            
+            return FolderNode(
+                name: name,
+                path: path,
+                depth: depth,
+                children: children,
+                videoCount: videoCountMap[path] ?? 0
+            )
+        }
+        
+        return buildNode(path: basePath, name: mountedFolder.name, depth: 0)
+    }
+}
+
+// 폴더 트리 뷰 컴포넌트
+struct FolderTreeView: View {
+    @EnvironmentObject var appState: AppState
+    
+    let folder: MountedFolder
+    let folderTree: FolderNode
+    @Binding var expandedFolders: Set<String>
+    let selectedSubfolderPath: String?
+    @Binding var showFolderSettings: MountedFolder?
+    let onSelectFolder: (String?, Bool) -> Void  // (path, rootOnly)
+    let onRescan: () -> Void
+    let onRemove: () -> Void
+    
+    @State private var isHovered = false
+    
+    private var isSelected: Bool {
+        selectedSubfolderPath == nil && appState.selectedFolder?.id == folder.id && !appState.selectedRootOnly
+    }
+    
+    private var isRootSelected: Bool {
+        selectedSubfolderPath == nil && appState.selectedFolder?.id == folder.id && appState.selectedRootOnly
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            // 루트 폴더 (마운트된 폴더)
+            HStack(spacing: 2) {
+                // 확장/축소 버튼 - 넓은 터치 영역
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        toggleExpanded(folderTree.path)
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .rotationEffect(.degrees(expandedFolders.contains(folderTree.path) ? 90 : 0))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .opacity(folderTree.children.isEmpty ? 0 : 1)
+                .disabled(folderTree.children.isEmpty)
+                
+                // 폴더 아이콘
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(isSelected ? .white : Color(nsColor: .systemBlue))
+                
+                // 폴더 이름
+                Text(folder.name)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .foregroundColor(isSelected ? .white : .primary)
+                
+                Spacer()
+                
+                // 메뉴 버튼 (호버 시에만 표시)
+                if isHovered || appState.isScanningFolder == folder.path {
+                    if appState.isScanningFolder == folder.path {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 20, height: 20)
+                    } else {
+                        Menu {
+                            Button {
+                                showFolderSettings = folder
+                            } label: {
+                                Label("설정", systemImage: "gearshape")
+                            }
+                            
+                            Button {
+                                onRescan()
+                            } label: {
+                                Label("재스캔", systemImage: "arrow.clockwise")
+                            }
+                            
+                            Divider()
+                            
+                            Button(role: .destructive) {
+                                onRemove()
+                            } label: {
+                                Label("제거", systemImage: "trash")
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(isSelected ? .white.opacity(0.8) : .secondary)
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.plain)
+                        .menuStyle(.borderlessButton)
+                    }
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected ? Color.accentColor : (isHovered ? Color.primary.opacity(0.08) : Color.clear))
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onSelectFolder(nil, false)
+            }
+            .onHover { hovering in
+                isHovered = hovering
+            }
+            
+            // 하위 폴더들 (펼쳐진 경우)
+            if expandedFolders.contains(folderTree.path) {
+                VStack(alignment: .leading, spacing: 1) {
+                    // <Root> 노드 - 하위 폴더가 있고 해당 폴더에 직접 영상이 있을 때만 표시
+                    if !folderTree.children.isEmpty && folderTree.videoCount > 0 {
+                        RootOnlyRow(
+                            path: folderTree.path,
+                            videoCount: folderTree.videoCount,
+                            isSelected: isRootSelected,
+                            onSelect: { onSelectFolder(nil, true) }
+                        )
+                    }
+                    
+                    ForEach(folderTree.children) { child in
+                        SubfolderRow(
+                            node: child,
+                            expandedFolders: $expandedFolders,
+                            selectedSubfolderPath: selectedSubfolderPath,
+                            selectedRootOnly: appState.selectedRootOnly,
+                            onSelect: onSelectFolder
+                        )
+                    }
+                }
+                .padding(.leading, 12)
+            }
+        }
+    }
+    
+    private func toggleExpanded(_ path: String) {
+        if expandedFolders.contains(path) {
+            expandedFolders.remove(path)
+        } else {
+            expandedFolders.insert(path)
+        }
+    }
+}
+
+// <Root> 전용 행 컴포넌트
+struct RootOnlyRow: View {
+    let path: String
+    let videoCount: Int
+    let isSelected: Bool
+    let onSelect: () -> Void
+    
+    @State private var isHovered = false
+    
+    var body: some View {
+        HStack(spacing: 2) {
+            // 화살표 자리 (없음)
+            Spacer().frame(width: 22)
+            
+            // 아이콘
+            Image(systemName: "folder.badge.minus")
+                .font(.system(size: 13))
+                .foregroundColor(isSelected ? .white : .orange)
+            
+            // 이름
+            Text("<Root>")
+                .font(.system(size: 13))
+                .foregroundColor(isSelected ? .white : .primary)
+            
+            Spacer()
+            
+            // 비디오 개수
+            if videoCount > 0 {
+                Text("\(videoCount)")
+                    .font(.system(size: 11))
+                    .foregroundColor(isSelected ? .white.opacity(0.8) : .secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? Color.accentColor : (isHovered ? Color.primary.opacity(0.08) : Color.clear))
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onSelect()
+        }
+        .onHover { hovering in
+            isHovered = hovering
+        }
+    }
+}
+
+// 하위 폴더 행 컴포넌트 - Finder 스타일
+struct SubfolderRow: View {
+    let node: FolderNode
+    @Binding var expandedFolders: Set<String>
+    let selectedSubfolderPath: String?
+    let selectedRootOnly: Bool
+    let onSelect: (String?, Bool) -> Void  // (path, rootOnly)
+    
+    @State private var isHovered = false
+    
+    private var isSelected: Bool {
+        selectedSubfolderPath == node.path && !selectedRootOnly
+    }
+    
+    private var isRootSelected: Bool {
+        selectedSubfolderPath == node.path && selectedRootOnly
+    }
+    
+    private var isExpanded: Bool {
+        expandedFolders.contains(node.path)
+    }
+    
+    // 해당 폴더의 전체 비디오 수 (하위 포함)
+    private var totalVideoCount: Int {
+        func countVideos(_ node: FolderNode) -> Int {
+            node.videoCount + node.children.reduce(0) { $0 + countVideos($1) }
+        }
+        return countVideos(node)
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 2) {
+                // 확장/축소 화살표 - 넓은 터치 영역
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        toggleExpanded(node.path)
+                    }
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .opacity(node.children.isEmpty ? 0 : 1)
+                .disabled(node.children.isEmpty)
+                
+                // 폴더 아이콘 - Finder 스타일
+                Image(systemName: "folder.fill")
+                    .font(.system(size: 14))
+                    .foregroundColor(isSelected ? .white : Color(nsColor: .systemBlue))
+                
+                // 폴더 이름
+                Text(node.name)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .foregroundColor(isSelected ? .white : .primary)
+                
+                Spacer()
+                
+                // 비디오 개수 (전체)
+                if totalVideoCount > 0 {
+                    Text("\(totalVideoCount)")
+                        .font(.system(size: 11))
+                        .foregroundColor(isSelected ? .white.opacity(0.8) : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelected ? Color.accentColor : (isHovered ? Color.primary.opacity(0.08) : Color.clear))
+            )
+            .contentShape(Rectangle())  // 전체 영역 클릭 가능
+            .onTapGesture {
+                onSelect(node.path, false)
+            }
+            .onHover { hovering in
+                isHovered = hovering
+            }
+            
+            // 하위 폴더 재귀적으로 표시
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 1) {
+                    // <Root> 노드 - 하위 폴더가 있고 해당 폴더에 직접 영상이 있을 때만
+                    if !node.children.isEmpty && node.videoCount > 0 {
+                        RootOnlyRow(
+                            path: node.path,
+                            videoCount: node.videoCount,
+                            isSelected: isRootSelected,
+                            onSelect: { onSelect(node.path, true) }
+                        )
+                    }
+                    
+                    ForEach(node.children) { child in
+                        SubfolderRow(
+                            node: child,
+                            expandedFolders: $expandedFolders,
+                            selectedSubfolderPath: selectedSubfolderPath,
+                            selectedRootOnly: selectedRootOnly,
+                            onSelect: onSelect
+                        )
+                    }
+                }
+                .padding(.leading, 12)
+            }
+        }
+    }
+    
+    private func toggleExpanded(_ path: String) {
+        if expandedFolders.contains(path) {
+            expandedFolders.remove(path)
+        } else {
+            expandedFolders.insert(path)
+        }
+    }
 }
 
 // Folder Settings Sheet
@@ -312,6 +676,7 @@ struct FolderSettingsSheet: View {
     
     let folder: MountedFolder
     @State private var scanDepthText: String
+    @State private var isScanning = false
     
     init(folder: MountedFolder) {
         self.folder = folder
@@ -336,6 +701,7 @@ struct FolderSettingsSheet: View {
                     TextField("깊이", text: $scanDepthText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 80)
+                        .disabled(isScanning)
                         .onChange(of: scanDepthText) { _, newValue in
                             let filtered = newValue.filter { $0.isNumber }
                             if let num = Int(filtered) {
@@ -363,19 +729,36 @@ struct FolderSettingsSheet: View {
                     dismiss()
                 }
                 .keyboardShortcut(.escape)
+                .disabled(isScanning)
                 
                 Spacer()
                 
-                Button("저장 후 재스캔") {
+                Button {
+                    isScanning = true
                     let depth = Int(scanDepthText) ?? folder.scanDepth
                     appState.updateFolderScanDepth(folder, depth: depth)
                     Task {
                         await appState.scanFolder(folder)
+                        await MainActor.run {
+                            isScanning = false
+                            dismiss()
+                        }
                     }
-                    dismiss()
+                } label: {
+                    HStack(spacing: 8) {
+                        if isScanning {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                                .frame(width: 16, height: 16)
+                            Text("스캔 중...")
+                        } else {
+                            Text("저장 후 재스캔")
+                        }
+                    }
                 }
                 .keyboardShortcut(.return)
                 .buttonStyle(.borderedProminent)
+                .disabled(isScanning)
             }
         }
         .padding()

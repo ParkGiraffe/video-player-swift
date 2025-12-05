@@ -6,6 +6,9 @@ struct VideoDetailSheet: View {
     
     let video: Video
     @State private var newParticipantName = ""
+    @State private var showDeleteConfirm = false
+    @State private var showThumbnailPicker = false
+    @State private var currentThumbnailPath: String?
     
     var body: some View {
         VStack(spacing: 20) {
@@ -27,15 +30,97 @@ struct VideoDetailSheet: View {
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    // Video Info
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(video.filename)
-                            .font(.title3)
-                            .fontWeight(.semibold)
+                    // Video Info + Thumbnail
+                    HStack(alignment: .top, spacing: 16) {
+                        // 썸네일 섹션
+                        VStack(spacing: 8) {
+                            ZStack {
+                                if let thumbPath = currentThumbnailPath ?? video.thumbnailPath,
+                                   let image = NSImage(contentsOfFile: thumbPath) {
+                                    Image(nsImage: image)
+                                        .resizable()
+                                        .aspectRatio(16/9, contentMode: .fill)
+                                } else {
+                                    Rectangle()
+                                        .fill(LinearGradient(
+                                            colors: [Color.purple.opacity(0.3), Color.blue.opacity(0.3)],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        ))
+                                    Image(systemName: "film")
+                                        .font(.system(size: 24))
+                                        .foregroundColor(.white.opacity(0.5))
+                                }
+                            }
+                            .frame(width: 140, height: 79)
+                            .cornerRadius(8)
+                            .clipped()
+                            
+                            Button {
+                                showThumbnailPicker = true
+                            } label: {
+                                Label("썸네일 변경", systemImage: "photo")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.accentColor)
+                        }
                         
-                        Text(formatFileSize(video.size))
-                            .font(.caption)
+                        // 비디오 정보
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(video.filename)
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .lineLimit(2)
+                            
+                            Text(formatFileSize(video.size))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    
+                    Divider()
+                    
+                    // 파일 경로 섹션
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("파일 경로")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        
+                        HStack {
+                            Text(video.path)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                            
+                            Spacer()
+                            
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(video.path, forType: .string)
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
                             .foregroundColor(.secondary)
+                            .help("경로 복사")
+                            
+                            Button {
+                                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: video.path)])
+                            } label: {
+                                Image(systemName: "folder")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.secondary)
+                            .help("Finder에서 보기")
+                        }
+                        .padding(10)
+                        .background(Color.primary.opacity(0.05))
+                        .cornerRadius(6)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     
@@ -233,6 +318,14 @@ struct VideoDetailSheet: View {
             
             // Action buttons
             HStack {
+                // 삭제 버튼
+                Button(role: .destructive) {
+                    showDeleteConfirm = true
+                } label: {
+                    Label("영상 삭제", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                
                 Spacer()
                 
                 Button {
@@ -245,7 +338,92 @@ struct VideoDetailSheet: View {
             }
         }
         .padding()
-        .frame(width: 480, height: 600)
+        .frame(width: 500, height: 700)
+        .onAppear {
+            currentThumbnailPath = video.thumbnailPath
+        }
+        .alert("영상 삭제", isPresented: $showDeleteConfirm) {
+            Button("취소", role: .cancel) { }
+            Button("삭제", role: .destructive) {
+                deleteVideo()
+            }
+        } message: {
+            Text("'\(video.filename)' 파일을 완전히 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.")
+        }
+        .fileImporter(
+            isPresented: $showThumbnailPicker,
+            allowedContentTypes: [.jpeg, .png, .webP],
+            allowsMultipleSelection: false
+        ) { result in
+            handleThumbnailSelection(result)
+        }
+    }
+    
+    private func deleteVideo() {
+        // 실제 파일 삭제
+        let fileManager = FileManager.default
+        do {
+            try fileManager.removeItem(atPath: video.path)
+            print("✅ Deleted video file: \(video.path)")
+            
+            // 썸네일도 삭제 (있으면)
+            if let thumbPath = video.thumbnailPath {
+                try? fileManager.removeItem(atPath: thumbPath)
+            }
+            
+            // 데이터베이스에서 제거
+            appState.deleteVideo(video)
+            
+            dismiss()
+        } catch {
+            print("❌ Failed to delete video: \(error.localizedDescription)")
+        }
+    }
+    
+    private func handleThumbnailSelection(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard let sourceURL = urls.first else { return }
+            
+            // Security-scoped resource 접근
+            guard sourceURL.startAccessingSecurityScopedResource() else {
+                print("❌ Failed to access thumbnail file")
+                return
+            }
+            defer { sourceURL.stopAccessingSecurityScopedResource() }
+            
+            // 영상과 같은 폴더에 같은 이름으로 저장
+            let videoURL = URL(fileURLWithPath: video.path)
+            let videoName = videoURL.deletingPathExtension().lastPathComponent
+            let ext = sourceURL.pathExtension.lowercased()
+            let destURL = videoURL.deletingLastPathComponent().appendingPathComponent("\(videoName).\(ext)")
+            
+            do {
+                let fileManager = FileManager.default
+                
+                // 기존 썸네일 삭제 (다른 확장자일 수 있음)
+                for oldExt in ["jpg", "jpeg", "png", "webp"] {
+                    let oldPath = videoURL.deletingLastPathComponent().appendingPathComponent("\(videoName).\(oldExt)")
+                    try? fileManager.removeItem(at: oldPath)
+                }
+                
+                // 새 썸네일 복사
+                try fileManager.copyItem(at: sourceURL, to: destURL)
+                
+                // UI 업데이트
+                currentThumbnailPath = destURL.path
+                
+                // 데이터베이스 업데이트
+                appState.updateVideoThumbnail(videoId: video.id, thumbnailPath: destURL.path)
+                
+                print("✅ Custom thumbnail saved: \(destURL.path)")
+            } catch {
+                print("❌ Failed to save thumbnail: \(error.localizedDescription)")
+            }
+            
+        case .failure(let error):
+            print("❌ Thumbnail picker error: \(error.localizedDescription)")
+        }
     }
     
     private func addParticipant() {
