@@ -38,6 +38,9 @@ class AppState: ObservableObject {
     @Published var autoPlayNextEnabled: Bool = false {  // 영상 종료 시 다음 영상 자동 재생
         didSet { UserDefaults.standard.set(autoPlayNextEnabled, forKey: "autoPlayNextEnabled") }
     }
+    @Published var seekSeconds: Double = 10 {  // 건너뛰기 초 단위
+        didSet { UserDefaults.standard.set(seekSeconds, forKey: "seekSeconds") }
+    }
     
     // 셔플 재생 히스토리 (순서 보존)
     private var playbackHistory: [String] = []  // 비디오 ID 배열 (재생 순서대로)
@@ -56,6 +59,8 @@ class AppState: ObservableObject {
         // 저장된 설정 불러오기
         self.shuffleEnabled = UserDefaults.standard.bool(forKey: "shuffleEnabled")
         self.autoPlayNextEnabled = UserDefaults.standard.bool(forKey: "autoPlayNextEnabled")
+        let savedSeekSeconds = UserDefaults.standard.double(forKey: "seekSeconds")
+        self.seekSeconds = savedSeekSeconds > 0 ? savedSeekSeconds : 10  // 기본값 10초
         
         loadData()
     }

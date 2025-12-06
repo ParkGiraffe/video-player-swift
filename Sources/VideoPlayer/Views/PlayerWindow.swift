@@ -15,6 +15,7 @@ struct PlayerWindow: View {
     @State private var hideControlsTask: Task<Void, Never>?
     @State private var isHovering = false
     @State private var videoEndedCancellable: AnyCancellable?
+    @State private var showDeleteConfirmation = false
     
     var body: some View {
         ZStack {
@@ -70,9 +71,12 @@ struct PlayerWindow: View {
             
             // Controls overlay
             if showControls && playerService.error == nil {
-                PlayerControlsOverlay(video: video) {
-                    closePlayer()
-                }
+                PlayerControlsOverlay(
+                    video: video,
+                    onClose: { closePlayer() },
+                    onDelete: { deleteCurrentVideo() },
+                    showDeleteConfirmation: $showDeleteConfirmation
+                )
                 .transition(.opacity)
             }
             
@@ -185,6 +189,12 @@ struct PlayerWindow: View {
             return .handled
         }
         
+        // Cmd + Backspace - 영상 삭제
+        if press.modifiers.contains(.command) && press.key == .delete {
+            showDeleteConfirmation = true
+            return .handled
+        }
+        
         // Cmd + Left/Right - 이전/다음 영상
         if press.modifiers.contains(.command) {
             if press.key == .leftArrow {
@@ -196,14 +206,14 @@ struct PlayerWindow: View {
             }
         }
         
-        // Left/Right arrows - 10초 이동
+        // Left/Right arrows - n초 이동 (설정된 초 단위)
         if press.key == .leftArrow {
-            playerService.seekRelative(-10)
+            playerService.seekRelative(-appState.seekSeconds)
             showControlsTemporarily()
             return .handled
         }
         if press.key == .rightArrow {
-            playerService.seekRelative(10)
+            playerService.seekRelative(appState.seekSeconds)
             showControlsTemporarily()
             return .handled
         }
@@ -277,6 +287,90 @@ struct PlayerWindow: View {
         appState.closePlayer()
         dismiss()
     }
+    
+    private func deleteCurrentVideo() {
+        guard let currentVideo = appState.currentPlayingVideo else { return }
+        
+        let fileManager = FileManager.default
+        let videoURL = URL(fileURLWithPath: currentVideo.path)
+        let videoName = videoURL.deletingPathExtension().lastPathComponent
+        let videoFolder = videoURL.deletingLastPathComponent()
+        
+        // 🔥 삭제 전에 다음 영상을 미리 결정
+        let nextVideo = determineNextVideoAfterDelete(currentVideo: currentVideo)
+        
+        // 1. 커스텀 썸네일 삭제 (영상과 같은 폴더에 같은 이름의 이미지 파일)
+        let thumbnailExtensions = ["jpg", "jpeg", "png", "webp"]
+        for ext in thumbnailExtensions {
+            let thumbnailPath = videoFolder.appendingPathComponent("\(videoName).\(ext)")
+            if fileManager.fileExists(atPath: thumbnailPath.path) {
+                do {
+                    try fileManager.removeItem(at: thumbnailPath)
+                    print("✅ 커스텀 썸네일 삭제 완료: \(thumbnailPath.lastPathComponent)")
+                } catch {
+                    print("⚠️ 커스텀 썸네일 삭제 실패: \(error.localizedDescription)")
+                }
+            }
+        }
+        
+        // 2. 앱에서 생성한 썸네일 삭제 (Application Support 폴더)
+        Task {
+            await ThumbnailService.shared.deleteThumbnail(videoId: currentVideo.id)
+        }
+        
+        // 3. 영상 파일 삭제
+        do {
+            try fileManager.removeItem(atPath: currentVideo.path)
+            print("✅ 영상 파일 삭제 완료: \(currentVideo.path)")
+        } catch {
+            print("❌ 영상 파일 삭제 실패: \(error.localizedDescription)")
+            // 파일 삭제 실패해도 DB에서는 삭제 진행
+        }
+        
+        // 앱 상태에서 삭제 (히스토리 처리 포함)
+        appState.deleteVideoAndUpdateHistory(currentVideo)
+        
+        // 다음 영상 재생 또는 플레이어 닫기
+        if let next = nextVideo {
+            appState.currentPlayingVideo = next
+            appState.currentVideoIndex = appState.videos.firstIndex(where: { $0.id == next.id }) ?? 0
+            playerService.loadFile(next.path)
+            
+            // 셔플 모드에서 히스토리에 추가
+            if appState.shuffleEnabled {
+                appState.addToPlaybackHistory(videoId: next.id)
+            }
+        } else {
+            // 재생할 영상이 없으면 플레이어 닫기
+            closePlayer()
+        }
+    }
+    
+    /// 삭제 후 재생할 다음 영상 결정 (삭제 전에 호출)
+    private func determineNextVideoAfterDelete(currentVideo: Video) -> Video? {
+        let videos = appState.videos
+        guard videos.count > 1 else { return nil }  // 삭제하면 0개가 됨
+        
+        if appState.shuffleEnabled {
+            // 셔플 모드: 현재 영상 제외하고 랜덤 선택
+            let candidates = videos.filter { $0.id != currentVideo.id }
+            return candidates.randomElement()
+        } else {
+            // 순차 모드: 다음 영상 또는 이전 영상
+            guard let currentIndex = videos.firstIndex(where: { $0.id == currentVideo.id }) else {
+                return videos.first { $0.id != currentVideo.id }
+            }
+            
+            if currentIndex < videos.count - 1 {
+                // 다음 영상이 있으면 다음 영상
+                return videos[currentIndex + 1]
+            } else if currentIndex > 0 {
+                // 마지막이면 이전 영상
+                return videos[currentIndex - 1]
+            }
+            return nil
+        }
+    }
 }
 
 // AVPlayer를 SwiftUI에 임베딩하는 NSViewRepresentable
@@ -325,10 +419,11 @@ struct PlayerControlsOverlay: View {
     
     let video: Video
     let onClose: () -> Void
+    let onDelete: () -> Void
+    @Binding var showDeleteConfirmation: Bool
     
     @State private var showSpeedMenu = false
     @State private var showSettingsMenu = false
-    @State private var showDeleteConfirmation = false
     
     // 셔플 모드에서는 히스토리 기반으로, 일반 모드에서는 인덱스 기반으로 판단
     private var canPlayPrevious: Bool {
@@ -344,6 +439,29 @@ struct PlayerControlsOverlay: View {
             return appState.videos.count > 1  // 셔플 모드에서는 영상이 2개 이상이면 항상 가능
         } else {
             return appState.currentVideoIndex < appState.videos.count - 1
+        }
+    }
+    
+    // 건너뛰기 아이콘 (설정된 초에 따라)
+    private var seekBackwardIcon: String {
+        switch Int(appState.seekSeconds) {
+        case 5: return "gobackward.5"
+        case 10: return "gobackward.10"
+        case 15: return "gobackward.15"
+        case 30: return "gobackward.30"
+        case 60: return "gobackward.60"
+        default: return "gobackward.10"
+        }
+    }
+    
+    private var seekForwardIcon: String {
+        switch Int(appState.seekSeconds) {
+        case 5: return "goforward.5"
+        case 10: return "goforward.10"
+        case 15: return "goforward.15"
+        case 30: return "goforward.30"
+        case 60: return "goforward.60"
+        default: return "goforward.10"
         }
     }
     
@@ -435,11 +553,11 @@ struct PlayerControlsOverlay: View {
                         .foregroundColor(canPlayPrevious ? .white : .white.opacity(0.3))
                         .disabled(!canPlayPrevious)
                         
-                        // -10s
+                        // -Ns (설정된 초만큼)
                         Button {
-                            playerService.seekRelative(-10)
+                            playerService.seekRelative(-appState.seekSeconds)
                         } label: {
-                            Image(systemName: "gobackward.10")
+                            Image(systemName: seekBackwardIcon)
                                 .font(.system(size: 26))
                         }
                         .buttonStyle(.plain)
@@ -455,11 +573,11 @@ struct PlayerControlsOverlay: View {
                         .buttonStyle(.plain)
                         .foregroundColor(.white)
                         
-                        // +10s
+                        // +Ns (설정된 초만큼)
                         Button {
-                            playerService.seekRelative(10)
+                            playerService.seekRelative(appState.seekSeconds)
                         } label: {
-                            Image(systemName: "goforward.10")
+                            Image(systemName: seekForwardIcon)
                                 .font(.system(size: 26))
                         }
                         .buttonStyle(.plain)
@@ -572,36 +690,63 @@ struct PlayerControlsOverlay: View {
                                     .font(.headline)
                                     .padding(.bottom, 4)
                                 
-                                Toggle(isOn: $appState.autoPlayNextEnabled) {
-                                    HStack {
-                                        Image(systemName: "play.circle")
-                                            .foregroundColor(appState.autoPlayNextEnabled ? .accentColor : .secondary)
-                                        Text("다음 영상 자동 재생")
-                                    }
+                                // 다음 영상 자동 재생
+                                HStack {
+                                    Image(systemName: "play.circle")
+                                        .foregroundColor(appState.autoPlayNextEnabled ? .accentColor : .secondary)
+                                        .frame(width: 20)
+                                    Text("다음 영상 자동 재생")
+                                    Spacer()
+                                    Toggle("", isOn: $appState.autoPlayNextEnabled)
+                                        .toggleStyle(.switch)
+                                        .labelsHidden()
                                 }
-                                .toggleStyle(.switch)
                                 
-                                Toggle(isOn: $appState.shuffleEnabled) {
-                                    HStack {
-                                        Image(systemName: "shuffle")
-                                            .foregroundColor(appState.shuffleEnabled ? .accentColor : .secondary)
-                                        Text("다음 영상 랜덤 재생")
-                                    }
-                                }
-                                .toggleStyle(.switch)
-                                .onChange(of: appState.shuffleEnabled) { _, newValue in
-                                    if !newValue {
-                                        appState.resetShuffleHistory()
-                                    }
+                                // 다음 영상 랜덤 재생
+                                HStack {
+                                    Image(systemName: "shuffle")
+                                        .foregroundColor(appState.shuffleEnabled ? .accentColor : .secondary)
+                                        .frame(width: 20)
+                                    Text("다음 영상 랜덤 재생")
+                                    Spacer()
+                                    Toggle("", isOn: $appState.shuffleEnabled)
+                                        .toggleStyle(.switch)
+                                        .labelsHidden()
+                                        .onChange(of: appState.shuffleEnabled) { _, newValue in
+                                            if !newValue {
+                                                appState.resetShuffleHistory()
+                                            }
+                                        }
                                 }
                                 
                                 Divider()
                                     .padding(.vertical, 4)
                                 
-                                // 영상 삭제 버튼
+                                // 건너뛰기 초 설정
+                                HStack {
+                                    Image(systemName: "forward")
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 20)
+                                    Text("건너뛰기")
+                                    Spacer()
+                                    Picker("", selection: $appState.seekSeconds) {
+                                        Text("5초").tag(5.0)
+                                        Text("10초").tag(10.0)
+                                        Text("15초").tag(15.0)
+                                        Text("30초").tag(30.0)
+                                        Text("60초").tag(60.0)
+                                    }
+                                    .pickerStyle(.menu)
+                                    .labelsHidden()
+                                    .frame(width: 80)
+                                }
+                                
+                                Divider()
+                                    .padding(.vertical, 4)
+                                
+                                // 영상 삭제 버튼 - 전체 너비 터치 영역
                                 Button(role: .destructive) {
                                     showSettingsMenu = false
-                                    // 약간의 딜레이 후 삭제 확인 모달 표시
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                                         showDeleteConfirmation = true
                                     }
@@ -609,20 +754,24 @@ struct PlayerControlsOverlay: View {
                                     HStack {
                                         Image(systemName: "trash")
                                             .foregroundColor(.red)
+                                            .frame(width: 20)
                                         Text("영상 삭제")
                                             .foregroundColor(.red)
+                                        Spacer()
                                     }
+                                    .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
                             }
                             .padding()
-                            .frame(width: 220)
+                            .frame(width: 250)
                         }
                         .alert("영상 삭제", isPresented: $showDeleteConfirmation) {
                             Button("취소", role: .cancel) { }
                             Button("삭제", role: .destructive) {
-                                deleteCurrentVideo()
+                                onDelete()
                             }
+                            .keyboardShortcut(.defaultAction)
                         } message: {
                             Text("'\(appState.currentPlayingVideo?.filename ?? video.filename)' 파일을 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.")
                         }
@@ -666,89 +815,6 @@ struct PlayerControlsOverlay: View {
         return String(format: "%d:%02d", minutes, secs)
     }
     
-    private func deleteCurrentVideo() {
-        guard let currentVideo = appState.currentPlayingVideo else { return }
-        
-        let fileManager = FileManager.default
-        let videoURL = URL(fileURLWithPath: currentVideo.path)
-        let videoName = videoURL.deletingPathExtension().lastPathComponent
-        let videoFolder = videoURL.deletingLastPathComponent()
-        
-        // 🔥 삭제 전에 다음 영상을 미리 결정
-        let nextVideo = determineNextVideoAfterDelete(currentVideo: currentVideo)
-        
-        // 1. 커스텀 썸네일 삭제 (영상과 같은 폴더에 같은 이름의 이미지 파일)
-        let thumbnailExtensions = ["jpg", "jpeg", "png", "webp"]
-        for ext in thumbnailExtensions {
-            let thumbnailPath = videoFolder.appendingPathComponent("\(videoName).\(ext)")
-            if fileManager.fileExists(atPath: thumbnailPath.path) {
-                do {
-                    try fileManager.removeItem(at: thumbnailPath)
-                    print("✅ 커스텀 썸네일 삭제 완료: \(thumbnailPath.lastPathComponent)")
-                } catch {
-                    print("⚠️ 커스텀 썸네일 삭제 실패: \(error.localizedDescription)")
-                }
-            }
-        }
-        
-        // 2. 앱에서 생성한 썸네일 삭제 (Application Support 폴더)
-        Task {
-            await ThumbnailService.shared.deleteThumbnail(videoId: currentVideo.id)
-        }
-        
-        // 3. 영상 파일 삭제
-        do {
-            try fileManager.removeItem(atPath: currentVideo.path)
-            print("✅ 영상 파일 삭제 완료: \(currentVideo.path)")
-        } catch {
-            print("❌ 영상 파일 삭제 실패: \(error.localizedDescription)")
-            // 파일 삭제 실패해도 DB에서는 삭제 진행
-        }
-        
-        // 앱 상태에서 삭제 (히스토리 처리 포함)
-        appState.deleteVideoAndUpdateHistory(currentVideo)
-        
-        // 다음 영상 재생 또는 플레이어 닫기
-        if let next = nextVideo {
-            appState.currentPlayingVideo = next
-            appState.currentVideoIndex = appState.videos.firstIndex(where: { $0.id == next.id }) ?? 0
-            playerService.loadFile(next.path)
-            
-            // 셔플 모드에서 히스토리에 추가
-            if appState.shuffleEnabled {
-                appState.addToPlaybackHistory(videoId: next.id)
-            }
-        } else {
-            // 재생할 영상이 없으면 플레이어 닫기
-            onClose()
-        }
-    }
-    
-    /// 삭제 후 재생할 다음 영상 결정 (삭제 전에 호출)
-    private func determineNextVideoAfterDelete(currentVideo: Video) -> Video? {
-        let videos = appState.videos
-        guard videos.count > 1 else { return nil }  // 삭제하면 0개가 됨
-        
-        if appState.shuffleEnabled {
-            // 셔플 모드: 현재 영상 제외하고 랜덤 선택
-            let candidates = videos.filter { $0.id != currentVideo.id }
-            return candidates.randomElement()
-        } else {
-            // 순차 모드: 다음 영상 또는 이전 영상
-            guard let currentIndex = videos.firstIndex(where: { $0.id == currentVideo.id }) else {
-                return videos.first { $0.id != currentVideo.id }
-            }
-            
-            if currentIndex < videos.count - 1 {
-                // 다음 영상이 있으면 다음 영상
-                return videos[currentIndex + 1]
-            } else if currentIndex > 0 {
-                // 마지막이면 이전 영상
-                return videos[currentIndex - 1]
-            }
-            return nil
-        }
-    }
 }
 
 // 프로그레스 슬라이더 - 큰 터치 영역
