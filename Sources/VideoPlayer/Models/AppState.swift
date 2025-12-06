@@ -32,8 +32,12 @@ class AppState: ObservableObject {
     @Published var isPlayerOpen: Bool = false
     @Published var currentPlayingVideo: Video?
     @Published var currentVideoIndex: Int = 0
-    @Published var shuffleEnabled: Bool = false
-    @Published var autoPlayNextEnabled: Bool = false  // 영상 종료 시 다음 영상 자동 재생
+    @Published var shuffleEnabled: Bool = false {
+        didSet { UserDefaults.standard.set(shuffleEnabled, forKey: "shuffleEnabled") }
+    }
+    @Published var autoPlayNextEnabled: Bool = false {  // 영상 종료 시 다음 영상 자동 재생
+        didSet { UserDefaults.standard.set(autoPlayNextEnabled, forKey: "autoPlayNextEnabled") }
+    }
     
     // 셔플 재생 히스토리 (순서 보존)
     private var playbackHistory: [String] = []  // 비디오 ID 배열 (재생 순서대로)
@@ -49,6 +53,10 @@ class AppState: ObservableObject {
     }
     
     init() {
+        // 저장된 설정 불러오기
+        self.shuffleEnabled = UserDefaults.standard.bool(forKey: "shuffleEnabled")
+        self.autoPlayNextEnabled = UserDefaults.standard.bool(forKey: "autoPlayNextEnabled")
+        
         loadData()
     }
     
@@ -335,6 +343,16 @@ class AppState: ObservableObject {
     func resetShuffleHistory() {
         playbackHistory.removeAll()
         historyIndex = -1
+    }
+    
+    /// 셔플 히스토리에 영상 추가 (삭제 후 다음 영상 재생 시 사용)
+    func addToPlaybackHistory(videoId: String) {
+        // 히스토리 끝에 추가
+        if historyIndex < playbackHistory.count - 1 {
+            playbackHistory = Array(playbackHistory.prefix(historyIndex + 1))
+        }
+        playbackHistory.append(videoId)
+        historyIndex = playbackHistory.count - 1
     }
     
     /// 비디오 삭제 및 히스토리 업데이트

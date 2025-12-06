@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import AVFoundation
+
 import Combine
 
 struct PlayerWindow: View {
@@ -673,6 +674,9 @@ struct PlayerControlsOverlay: View {
         let videoName = videoURL.deletingPathExtension().lastPathComponent
         let videoFolder = videoURL.deletingLastPathComponent()
         
+        // 🔥 삭제 전에 다음 영상을 미리 결정
+        let nextVideo = determineNextVideoAfterDelete(currentVideo: currentVideo)
+        
         // 1. 커스텀 썸네일 삭제 (영상과 같은 폴더에 같은 이름의 이미지 파일)
         let thumbnailExtensions = ["jpg", "jpeg", "png", "webp"]
         for ext in thumbnailExtensions {
@@ -701,21 +705,48 @@ struct PlayerControlsOverlay: View {
             // 파일 삭제 실패해도 DB에서는 삭제 진행
         }
         
-        // 다음 영상 재생을 위해 미리 확인
-        let hasNextVideo = canPlayNext || (appState.shuffleEnabled && appState.videos.count > 1)
-        
         // 앱 상태에서 삭제 (히스토리 처리 포함)
         appState.deleteVideoAndUpdateHistory(currentVideo)
         
         // 다음 영상 재생 또는 플레이어 닫기
-        if hasNextVideo && appState.videos.count > 0 {
-            appState.playNextVideo()
-            if let nextVideo = appState.currentPlayingVideo {
-                playerService.loadFile(nextVideo.path)
+        if let next = nextVideo {
+            appState.currentPlayingVideo = next
+            appState.currentVideoIndex = appState.videos.firstIndex(where: { $0.id == next.id }) ?? 0
+            playerService.loadFile(next.path)
+            
+            // 셔플 모드에서 히스토리에 추가
+            if appState.shuffleEnabled {
+                appState.addToPlaybackHistory(videoId: next.id)
             }
         } else {
             // 재생할 영상이 없으면 플레이어 닫기
             onClose()
+        }
+    }
+    
+    /// 삭제 후 재생할 다음 영상 결정 (삭제 전에 호출)
+    private func determineNextVideoAfterDelete(currentVideo: Video) -> Video? {
+        let videos = appState.videos
+        guard videos.count > 1 else { return nil }  // 삭제하면 0개가 됨
+        
+        if appState.shuffleEnabled {
+            // 셔플 모드: 현재 영상 제외하고 랜덤 선택
+            let candidates = videos.filter { $0.id != currentVideo.id }
+            return candidates.randomElement()
+        } else {
+            // 순차 모드: 다음 영상 또는 이전 영상
+            guard let currentIndex = videos.firstIndex(where: { $0.id == currentVideo.id }) else {
+                return videos.first { $0.id != currentVideo.id }
+            }
+            
+            if currentIndex < videos.count - 1 {
+                // 다음 영상이 있으면 다음 영상
+                return videos[currentIndex + 1]
+            } else if currentIndex > 0 {
+                // 마지막이면 이전 영상
+                return videos[currentIndex - 1]
+            }
+            return nil
         }
     }
 }
