@@ -1,25 +1,13 @@
 # video-player-swift
 
-## 1. 프로젝트 초기화
+## 1. 프로젝트 빌드
 
 ```bash
-swift package init
+./Scripts/build-release.sh
 ```
 
-## 2. 프로젝트 빌드
+## 2. 프로젝트 실행
 
 ```bash
-swift build
-```
-
-## 3. 프로젝트 실행
-
-```bash
-swift run
-```
-
-## 4. 프로젝트 빌드 및 실행
-
-```bash
-swift build
+./Release/VideoPlayer.app/Contents/MacOS/VideoPlayer
 ```
