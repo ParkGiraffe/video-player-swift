@@ -16,7 +16,7 @@ class VideoPlayerService: ObservableObject {
     let player = AVPlayer()
     
     // MPV Player View (mkv, avi 등)
-    var mpvPlayerView: MPVPlayerView?
+    @Published var mpvPlayerView: MPVPlayerView?
     
     private var timeObserver: Any?
     private var cancellables = Set<AnyCancellable>()

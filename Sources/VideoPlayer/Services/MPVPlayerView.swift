@@ -302,6 +302,12 @@ class MPVPlayerView: NSOpenGLView {
         context.flushBuffer()
     }
     
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        openGLContext?.update()
+        needsDisplay = true
+    }
+
     override func reshape() {
         super.reshape()
         needsDisplay = true
