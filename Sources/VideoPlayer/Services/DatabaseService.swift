@@ -16,6 +16,8 @@ class DatabaseService {
     private let videoParticipants = Table("video_participants")
     private let videoLanguages = Table("video_languages")
     private let playbackPositions = Table("playback_positions")
+    private let subtitleDelays = Table("subtitle_delays")
+    private let subtitleDelay = Expression<Double>("delay")
     
     // Columns
     private let id = Expression<String>("id")
@@ -125,7 +127,13 @@ class DatabaseService {
                 t.column(videoId, primaryKey: true)
                 t.column(position)
             })
-            
+
+            // Subtitle delays
+            try db.run(subtitleDelays.create(ifNotExists: true) { t in
+                t.column(videoId, primaryKey: true)
+                t.column(subtitleDelay)
+            })
+
         } catch {
             print("Failed to create tables: \(error)")
         }
@@ -613,7 +621,7 @@ class DatabaseService {
     
     func getPlaybackPosition(videoId: String) -> Double? {
         guard let db = db else { return nil }
-        
+
         do {
             if let row = try db.pluck(playbackPositions.filter(self.videoId == videoId)) {
                 return row[position]
@@ -623,7 +631,31 @@ class DatabaseService {
         }
         return nil
     }
-    
+
+    func saveSubtitleDelay(videoId: String, delay: Double) {
+        guard let db = db else { return }
+        do {
+            try db.run(subtitleDelays.insert(or: .replace,
+                self.videoId <- videoId,
+                subtitleDelay <- delay
+            ))
+        } catch {
+            print("Failed to save subtitle delay: \(error)")
+        }
+    }
+
+    func getSubtitleDelay(videoId: String) -> Double? {
+        guard let db = db else { return nil }
+        do {
+            if let row = try db.pluck(subtitleDelays.filter(self.videoId == videoId)) {
+                return row[subtitleDelay]
+            }
+        } catch {
+            print("Failed to get subtitle delay: \(error)")
+        }
+        return nil
+    }
+
     // MARK: - Thumbnail
     
     func updateVideoThumbnail(videoId: String, thumbnailPath: String) {

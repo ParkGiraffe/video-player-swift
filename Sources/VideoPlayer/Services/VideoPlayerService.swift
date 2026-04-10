@@ -27,6 +27,7 @@ class VideoPlayerService: ObservableObject {
     @Published var volume: Float = 1.0
     @Published var isMuted: Bool = false
     @Published var playbackSpeed: Float = 1.0
+    @Published var subtitleDelay: Double = 0.0
     @Published var isLoaded: Bool = false
     @Published var error: String?
     @Published var currentPlayerType: PlayerType = .avPlayer
@@ -288,7 +289,14 @@ class VideoPlayerService: ObservableObject {
             }
         }
     }
-    
+
+    func setSubtitleDelay(_ delay: Double) {
+        subtitleDelay = delay
+        if currentPlayerType == .mpv {
+            mpvPlayerView?.setSubtitleDelay(delay)
+        }
+    }
+
     func stop() {
         if currentPlayerType == .mpv {
             mpvPlayerView?.stop()

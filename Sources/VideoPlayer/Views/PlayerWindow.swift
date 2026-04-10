@@ -114,11 +114,18 @@ struct PlayerWindow: View {
     
     private func loadVideo() {
         let position = DatabaseService.shared.getPlaybackPosition(videoId: video.id)
+        let savedDelay = DatabaseService.shared.getSubtitleDelay(videoId: video.id) ?? 0.0
         playerService.loadFile(video.path)
-        
+        playerService.subtitleDelay = savedDelay
+
         if let pos = position, pos > 1 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 playerService.seek(to: pos)
+            }
+        }
+        if savedDelay != 0.0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                playerService.setSubtitleDelay(savedDelay)
             }
         }
     }
@@ -155,9 +162,11 @@ struct PlayerWindow: View {
     }
     
     private func savePosition() {
+        let currentId = appState.currentPlayingVideo?.id ?? video.id
         if playerService.currentTime > 0 {
-            DatabaseService.shared.savePlaybackPosition(videoId: video.id, position: playerService.currentTime)
+            DatabaseService.shared.savePlaybackPosition(videoId: currentId, position: playerService.currentTime)
         }
+        DatabaseService.shared.saveSubtitleDelay(videoId: currentId, delay: playerService.subtitleDelay)
     }
     
     private func showControlsTemporarily() {
@@ -263,11 +272,18 @@ struct PlayerWindow: View {
     
     private func loadVideoFor(_ video: Video) {
         let position = DatabaseService.shared.getPlaybackPosition(videoId: video.id)
+        let savedDelay = DatabaseService.shared.getSubtitleDelay(videoId: video.id) ?? 0.0
         playerService.loadFile(video.path)
-        
+        playerService.subtitleDelay = savedDelay
+
         if let pos = position, pos > 1 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 playerService.seek(to: pos)
+            }
+        }
+        if savedDelay != 0.0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                playerService.setSubtitleDelay(savedDelay)
             }
         }
     }
@@ -328,6 +344,7 @@ struct PlayerControlsOverlay: View {
     @State private var showSpeedMenu = false
     @State private var showSettingsMenu = false
     @State private var showDeleteConfirmation = false
+    @State private var subtitleDelayText: String = "0.0"
     
     // 셔플 모드에서는 히스토리 기반으로, 일반 모드에서는 인덱스 기반으로 판단
     private var canPlayPrevious: Bool {
@@ -596,7 +613,112 @@ struct PlayerControlsOverlay: View {
                                 
                                 Divider()
                                     .padding(.vertical, 4)
-                                
+
+                                // 자막 싱크
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("자막 싱크")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+
+                                    HStack(spacing: 4) {
+                                        Button {
+                                            let v = (playerService.subtitleDelay - 0.5).rounded(toPlaces: 2)
+                                            playerService.setSubtitleDelay(v)
+                                            subtitleDelayText = formatSubtitleDelay(v)
+                                        } label: {
+                                            Text("-0.5")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 4)
+                                                .background(Color.secondary.opacity(0.15))
+                                                .cornerRadius(4)
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        Button {
+                                            let v = (playerService.subtitleDelay - 0.1).rounded(toPlaces: 2)
+                                            playerService.setSubtitleDelay(v)
+                                            subtitleDelayText = formatSubtitleDelay(v)
+                                        } label: {
+                                            Text("-0.1")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 4)
+                                                .background(Color.secondary.opacity(0.15))
+                                                .cornerRadius(4)
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        TextField("0.0", text: $subtitleDelayText)
+                                            .multilineTextAlignment(.center)
+                                            .font(.system(size: 13, design: .monospaced))
+                                            .frame(width: 62)
+                                            .textFieldStyle(.roundedBorder)
+                                            .onSubmit {
+                                                if let v = Double(subtitleDelayText) {
+                                                    let rounded = v.rounded(toPlaces: 2)
+                                                    playerService.setSubtitleDelay(rounded)
+                                                    subtitleDelayText = formatSubtitleDelay(rounded)
+                                                } else {
+                                                    subtitleDelayText = formatSubtitleDelay(playerService.subtitleDelay)
+                                                }
+                                            }
+
+                                        Text("s")
+                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 12))
+
+                                        Button {
+                                            let v = (playerService.subtitleDelay + 0.1).rounded(toPlaces: 2)
+                                            playerService.setSubtitleDelay(v)
+                                            subtitleDelayText = formatSubtitleDelay(v)
+                                        } label: {
+                                            Text("+0.1")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 4)
+                                                .background(Color.secondary.opacity(0.15))
+                                                .cornerRadius(4)
+                                        }
+                                        .buttonStyle(.plain)
+
+                                        Button {
+                                            let v = (playerService.subtitleDelay + 0.5).rounded(toPlaces: 2)
+                                            playerService.setSubtitleDelay(v)
+                                            subtitleDelayText = formatSubtitleDelay(v)
+                                        } label: {
+                                            Text("+0.5")
+                                                .font(.system(size: 12, weight: .medium))
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 4)
+                                                .background(Color.secondary.opacity(0.15))
+                                                .cornerRadius(4)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+
+                                    if playerService.subtitleDelay != 0.0 {
+                                        Button {
+                                            playerService.setSubtitleDelay(0.0)
+                                            subtitleDelayText = "0.0"
+                                        } label: {
+                                            Text("초기화")
+                                                .font(.caption)
+                                                .foregroundColor(.accentColor)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .onChange(of: playerService.subtitleDelay) { _, newValue in
+                                    subtitleDelayText = formatSubtitleDelay(newValue)
+                                }
+                                .onAppear {
+                                    subtitleDelayText = formatSubtitleDelay(playerService.subtitleDelay)
+                                }
+
+                                Divider()
+                                    .padding(.vertical, 4)
+
                                 // 영상 삭제 버튼
                                 Button(role: .destructive) {
                                     showSettingsMenu = false
@@ -642,6 +764,11 @@ struct PlayerControlsOverlay: View {
         }
     }
     
+    private func formatSubtitleDelay(_ delay: Double) -> String {
+        if delay == 0 { return "0.0" }
+        return String(format: "%.2f", delay)
+    }
+
     private var volumeIcon: String {
         if playerService.volume == 0 {
             return "speaker.fill"
@@ -840,6 +967,13 @@ struct VolumeSlider: View {
                     }
             )
         }
+    }
+}
+
+private extension Double {
+    func rounded(toPlaces places: Int) -> Double {
+        let divisor = pow(10.0, Double(places))
+        return (self * divisor).rounded() / divisor
     }
 }
 

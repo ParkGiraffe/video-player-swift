@@ -367,7 +367,11 @@ class MPVPlayerView: NSOpenGLView {
     func setSpeed(_ speed: Double) {
         command("set", "speed", String(speed))
     }
-    
+
+    func setSubtitleDelay(_ delay: Double) {
+        command("set", "sub-delay", String(delay))
+    }
+
     func stop() {
         command("stop")
     }
