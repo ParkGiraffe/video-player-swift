@@ -92,24 +92,44 @@ class VideoPlayerService: ObservableObject {
             .store(in: &cancellables)
     }
     
-    // 포맷에 따라 사용할 플레이어 결정
+    // 포맷에 따라 사용할 플레이어 결정 (확장자 기반 빠른 경로)
     func getPlayerType(for path: String) -> PlayerType {
         let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
         return mpvOnlyFormats.contains(ext) ? .mpv : .avPlayer
     }
-    
+
     func loadFile(_ path: String) {
         error = nil
         isLoaded = false
-        
-        let playerType = getPlayerType(for: path)
-        currentPlayerType = playerType
-        
-        if playerType == .mpv {
+
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+
+        // mkv/avi/webm 등은 무조건 MPV로
+        if mpvOnlyFormats.contains(ext) {
+            currentPlayerType = .mpv
             loadWithMPV(path)
-        } else {
-            loadWithAVPlayer(path)
+            return
         }
+
+        // mp4/mov 등의 컨테이너는 내부 코덱이 VP9/AV1일 수 있으므로 프로빙 필요
+        if CodecDetector.ambiguousContainerExtensions.contains(ext) {
+            Task { @MainActor in
+                let compatible = await CodecDetector.isAVPlayerCompatible(path: path)
+                if compatible {
+                    self.currentPlayerType = .avPlayer
+                    self.loadWithAVPlayer(path)
+                } else {
+                    print("⚠️ Codec not AVPlayer-compatible, routing to MPV: \(path)")
+                    self.currentPlayerType = .mpv
+                    self.loadWithMPV(path)
+                }
+            }
+            return
+        }
+
+        // 그 외 확장자는 AVPlayer 시도
+        currentPlayerType = .avPlayer
+        loadWithAVPlayer(path)
     }
     
     private func loadWithAVPlayer(_ path: String) {
@@ -134,13 +154,17 @@ class VideoPlayerService: ObservableObject {
         playerItem.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] status in
+                guard let self = self else { return }
                 if status == .readyToPlay {
-                    self?.duration = playerItem.duration.seconds
-                    self?.isLoaded = true
-                    self?.play()
+                    self.duration = playerItem.duration.seconds
+                    self.isLoaded = true
+                    self.play()
                 } else if status == .failed {
-                    self?.error = playerItem.error?.localizedDescription ?? "재생할 수 없습니다"
-                    self?.isLoaded = false
+                    // AVPlayer가 재생 못하면 MPV로 폴백 시도 (코덱 프로빙을 통과했지만
+                    // 실제 디코딩에서 실패한 경우 대비)
+                    print("⚠️ AVPlayer failed for \(path), falling back to MPV. Error: \(playerItem.error?.localizedDescription ?? "unknown")")
+                    self.currentPlayerType = .mpv
+                    self.loadWithMPV(path)
                 }
             }
             .store(in: &cancellables)
