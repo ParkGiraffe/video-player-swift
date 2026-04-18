@@ -4,11 +4,12 @@ import CoreMedia
 
 enum CodecDetector {
     // AVFoundation이 안정적으로 디코딩하는 비디오 코덱 FourCharCode
-    // VP9('vp09'), AV1('av01') 같은 오픈 코덱은 여기 없으므로 MPV로 폴백됨
+    // VP9('vp09'), AV1('av01') 같은 오픈 코덱은 여기 없으므로 MPV로 폴백됨.
+    // HEVC는 'hvc1'만 안정적 — 'hev1'(파라미터 셋이 비트스트림 인라인)은
+    // AVPlayer에서 오디오만 나오거나 프레임이 깨져서 MPV로 보내야 함.
     private static let avPlayerCompatibleCodecs: Set<FourCharCode> = [
         kCMVideoCodecType_H264,           // 'avc1'
         kCMVideoCodecType_HEVC,           // 'hvc1'
-        0x68657631,                        // 'hev1' (HEVC 변종)
         kCMVideoCodecType_MPEG4Video,      // 'mp4v'
         kCMVideoCodecType_AppleProRes422,
         kCMVideoCodecType_AppleProRes4444,
