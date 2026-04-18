@@ -81,7 +81,6 @@ class MPVPlayerView: NSOpenGLView {
         mpv_observe_property(mpv, 0, "time-pos", MPV_FORMAT_DOUBLE)
         mpv_observe_property(mpv, 1, "duration", MPV_FORMAT_DOUBLE)
         mpv_observe_property(mpv, 2, "pause", MPV_FORMAT_FLAG)
-        mpv_observe_property(mpv, 3, "eof-reached", MPV_FORMAT_FLAG)
         
         // Setup OpenGL
         return setupOpenGL()
@@ -204,7 +203,14 @@ class MPVPlayerView: NSOpenGLView {
                 handlePropertyChange(event: eventPtr)
                 
             case MPV_EVENT_END_FILE:
-                onEndOfFile?()
+                // reason=EOF (자연 종료)만 다음 영상 트리거로 간주.
+                // STOP/QUIT/ERROR/REDIRECT는 loadfile replace 등으로도 발동되므로 무시.
+                if let data = eventPtr.pointee.data {
+                    let endFile = data.assumingMemoryBound(to: mpv_event_end_file.self).pointee
+                    if endFile.reason == MPV_END_FILE_REASON_EOF {
+                        onEndOfFile?()
+                    }
+                }
                 
             case MPV_EVENT_FILE_LOADED:
                 onLoadStateChange?(true)
@@ -247,14 +253,6 @@ class MPVPlayerView: NSOpenGLView {
             if prop.format == MPV_FORMAT_FLAG, let dataPtr = prop.data {
                 let paused = dataPtr.assumingMemoryBound(to: Int32.self).pointee != 0
                 onPlaybackStateChange?(!paused)
-            }
-            
-        case "eof-reached":
-            if prop.format == MPV_FORMAT_FLAG, let dataPtr = prop.data {
-                let eof = dataPtr.assumingMemoryBound(to: Int32.self).pointee != 0
-                if eof {
-                    onEndOfFile?()
-                }
             }
             
         default:
