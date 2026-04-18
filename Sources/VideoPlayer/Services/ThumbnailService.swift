@@ -4,21 +4,21 @@ import AppKit
 
 actor ThumbnailService {
     static let shared = ThumbnailService()
-
+    
     private let thumbnailDirectory: URL
     private let fileManager = FileManager.default
-
+    
     // 썸네일 캐시 (메모리)
     private var thumbnailCache: [String: String] = [:]
-
+    
     private init() {
         // 앱 지원 디렉토리에 썸네일 폴더 생성
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         thumbnailDirectory = appSupport.appendingPathComponent("VideoPlayer/Thumbnails")
-
+        
         try? FileManager.default.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
     }
-
+    
     /// 비디오에서 썸네일 생성
     /// - Parameters:
     ///   - videoPath: 비디오 파일 경로
@@ -32,12 +32,18 @@ actor ThumbnailService {
                 return cached
             }
         }
-
+        
         // 이미 생성된 썸네일이 있는지 확인
         let thumbnailPath = thumbnailDirectory.appendingPathComponent("\(videoId).jpg")
         if fileManager.fileExists(atPath: thumbnailPath.path) {
             thumbnailCache[videoId] = thumbnailPath.path
             return thumbnailPath.path
+        }
+        
+        // 파일이 디스크에 존재하지 않으면 바로 실패 (stale DB 레코드 방어)
+        guard fileManager.fileExists(atPath: videoPath) else {
+            print("⚠️ Video file missing on disk, skipping thumbnail: \(videoPath)")
+            return nil
         }
 
         // 비디오에서 썸네일 추출
@@ -116,80 +122,121 @@ actor ThumbnailService {
             return nil
         }
 
+        // 1차: 10% 지점 정확 seek 시도
+        if runMPVThumbnail(mpvPath: mpvPath, videoPath: videoPath, outputPath: outputPath, startArg: "--start=10%", hrSeek: true) {
+            thumbnailCache[videoId] = outputPath
+            print("✅ Generated thumbnail via mpv: \((outputPath as NSString).lastPathComponent)")
+            return outputPath
+        }
+
+        // 2차 폴백: 파일 앞부분에서 키프레임 아무거나 (손상된 파일 대응)
+        if runMPVThumbnail(mpvPath: mpvPath, videoPath: videoPath, outputPath: outputPath, startArg: "--start=0", hrSeek: false) {
+            thumbnailCache[videoId] = outputPath
+            print("✅ Generated thumbnail via mpv (fallback start=0): \((outputPath as NSString).lastPathComponent)")
+            return outputPath
+        }
+
+        print("❌ mpv thumbnail generation failed after fallbacks for: \(videoPath)")
+        return nil
+    }
+
+    private func runMPVThumbnail(mpvPath: String, videoPath: String, outputPath: String, startArg: String, hrSeek: Bool) -> Bool {
+        // 이전 시도로 남은 출력 제거 (부분 기록 방지)
+        try? fileManager.removeItem(atPath: outputPath)
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: mpvPath)
-        process.arguments = [
+        var args = [
             "--no-config",
             "--no-audio",
             "--no-sub",
             "--frames=1",
-            "--start=10%",
+            startArg,
             "--vf=scale=480:-2",
             "--ovc=mjpeg",
             "--ovcopts=strict=unofficial",
             "--o=\(outputPath)",
-            videoPath
         ]
+        if !hrSeek {
+            args.append("--hr-seek=no")
+        }
+        args.append(videoPath)
+        process.arguments = args
+
+        // stdout/stderr 모두 파이프로 받되 비동기로 읽어 버퍼 블록 방지
+        let outPipe = Pipe()
         let errPipe = Pipe()
+        process.standardOutput = outPipe
         process.standardError = errPipe
-        process.standardOutput = Pipe()
+
+        var stdoutData = Data()
+        var stderrData = Data()
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if !chunk.isEmpty { stdoutData.append(chunk) }
+        }
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if !chunk.isEmpty { stderrData.append(chunk) }
+        }
 
         do {
             try process.run()
             process.waitUntilExit()
         } catch {
             print("❌ Failed to launch mpv for thumbnail: \(error.localizedDescription)")
-            return nil
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+            return false
         }
 
-        guard process.terminationStatus == 0, fileManager.fileExists(atPath: outputPath) else {
-            let errStr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            print("❌ mpv thumbnail generation failed (status \(process.terminationStatus)) for \(videoPath): \(errStr.suffix(400))")
-            return nil
-        }
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        errPipe.fileHandleForReading.readabilityHandler = nil
 
-        thumbnailCache[videoId] = outputPath
-        print("✅ Generated thumbnail via mpv: \((outputPath as NSString).lastPathComponent)")
-        return outputPath
+        let success = fileManager.fileExists(atPath: outputPath)
+        if !success {
+            let combined = (String(data: stderrData, encoding: .utf8) ?? "") + (String(data: stdoutData, encoding: .utf8) ?? "")
+            print("↪️ mpv attempt failed (status \(process.terminationStatus), \(startArg)) for \(videoPath): \(combined.suffix(300))")
+        }
+        return success
     }
 
     private func findMPVBinary() -> String? {
         let paths = ["/opt/homebrew/bin/mpv", "/usr/local/bin/mpv", "/usr/bin/mpv"]
         return paths.first { fileManager.fileExists(atPath: $0) }
     }
-
+    
     /// 여러 비디오의 썸네일을 일괄 생성
     func generateThumbnails(for videos: [(path: String, id: String)]) async -> [String: String] {
         var results: [String: String] = [:]
-
+        
         for video in videos {
             if let thumbnailPath = await generateThumbnail(for: video.path, videoId: video.id) {
                 results[video.id] = thumbnailPath
             }
         }
-
+        
         return results
     }
-
+    
     /// 썸네일 삭제
     func deleteThumbnail(videoId: String) {
         let thumbnailPath = thumbnailDirectory.appendingPathComponent("\(videoId).jpg")
         try? fileManager.removeItem(at: thumbnailPath)
         thumbnailCache.removeValue(forKey: videoId)
     }
-
+    
     /// 모든 캐시 삭제
     func clearAllThumbnails() {
         try? fileManager.removeItem(at: thumbnailDirectory)
         try? fileManager.createDirectory(at: thumbnailDirectory, withIntermediateDirectories: true)
         thumbnailCache.removeAll()
     }
-
+    
     /// 캐시에서 썸네일 경로 가져오기
     func getCachedThumbnail(videoId: String) -> String? {
         return thumbnailCache[videoId]
     }
 }
-
 
 
