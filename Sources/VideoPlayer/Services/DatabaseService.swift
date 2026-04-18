@@ -45,17 +45,45 @@ class DatabaseService {
         do {
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             let appFolder = appSupport.appendingPathComponent("VideoPlayer")
-            
+
             try FileManager.default.createDirectory(at: appFolder, withIntermediateDirectories: true)
-            
+
             let dbPath = appFolder.appendingPathComponent("database.sqlite")
             db = try Connection(dbPath.path)
-            
+
             createTables()
-            
+            migrateFilenamesToNFCIfNeeded()
+
             print("Database initialized at: \(dbPath.path)")
         } catch {
             print("Database error: \(error)")
+        }
+    }
+
+    // macOS 파일시스템은 파일명을 NFD(자모 분해)로 돌려주는데, SwiftUI TextField 입력은
+    // NFC(완성형)라 SQLite LIKE가 바이트 단위로 매칭에 실패한다. 기존 NFD 레코드를
+    // NFC로 일괄 변환해 검색 경로를 통일한다.
+    private func migrateFilenamesToNFCIfNeeded() {
+        let migrationKey = "DatabaseService.filenameNFCMigrated.v1"
+        if UserDefaults.standard.bool(forKey: migrationKey) { return }
+        guard let db = db else { return }
+
+        do {
+            var migrated = 0
+            for row in try db.prepare(videos) {
+                let current = row[filename]
+                let normalized = current.precomposedStringWithCanonicalMapping
+                if current != normalized {
+                    try db.run(videos.filter(id == row[id]).update(filename <- normalized))
+                    migrated += 1
+                }
+            }
+            UserDefaults.standard.set(true, forKey: migrationKey)
+            if migrated > 0 {
+                print("✅ Migrated \(migrated) filename(s) to NFC for Korean search")
+            }
+        } catch {
+            print("⚠️ Filename NFC migration failed: \(error)")
         }
     }
     
@@ -153,7 +181,7 @@ class DatabaseService {
             try db.run(videos.insert(or: .replace,
                 id <- video.id,
                 path <- video.path,
-                filename <- video.filename,
+                filename <- video.filename.precomposedStringWithCanonicalMapping,
                 folderPath <- video.folderPath,
                 size <- video.size,
                 createdAt <- dateFormatter.string(from: video.createdAt),
@@ -179,8 +207,9 @@ class DatabaseService {
         }
         
         if let search = searchQuery {
-            query = query.filter(filename.like("%\(search)%"))
-            print("   🔎 DB filter by search: %\(search)%")
+            let normalized = search.precomposedStringWithCanonicalMapping
+            query = query.filter(filename.like("%\(normalized)%"))
+            print("   🔎 DB filter by search: %\(normalized)%")
         }
         
         query = query.order(filename.asc)
