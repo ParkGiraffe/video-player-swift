@@ -64,7 +64,10 @@ class DatabaseService {
     // NFC(완성형)라 SQLite LIKE가 바이트 단위로 매칭에 실패한다. 기존 NFD 레코드를
     // NFC로 일괄 변환해 검색 경로를 통일한다.
     private func migrateFilenamesToNFCIfNeeded() {
-        let migrationKey = "DatabaseService.filenameNFCMigrated.v1"
+        // v2: Swift `==`는 유니코드 canonical equivalence로 비교해서 NFD/NFC를 같다고
+        // 판단한다. v1에서는 그 때문에 UPDATE가 건너뛰어졌다. UTF-8 바이트를 직접
+        // 비교해 실제로 다른 형태일 때만 쓴다.
+        let migrationKey = "DatabaseService.filenameNFCMigrated.v2"
         if UserDefaults.standard.bool(forKey: migrationKey) { return }
         guard let db = db else { return }
 
@@ -73,7 +76,7 @@ class DatabaseService {
             for row in try db.prepare(videos) {
                 let current = row[filename]
                 let normalized = current.precomposedStringWithCanonicalMapping
-                if current != normalized {
+                if !current.utf8.elementsEqual(normalized.utf8) {
                     try db.run(videos.filter(id == row[id]).update(filename <- normalized))
                     migrated += 1
                 }
